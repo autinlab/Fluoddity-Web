@@ -1005,6 +1005,78 @@ reason worth knowing:
   owner to re-issue it, and the missing bytes have exactly one reading — so
   unlike the v7 *document* format, this legacy arm earns its place.
 
+### Image Scale, and why it is not a config lane
+
+`Image Scale` enlarges the image across the world: 1 fits it, higher values blow
+it up so its structure is coarser than the particles. That is the point of having
+it — at scale 1 a tomogram's features can be finer than the particles themselves
+and the bias reads as texture; enlarged, the same field reads as shape, and
+particles trace a membrane as a curve.
+
+**It is not in `ConfigData`, and that is a placement rather than a shortage.**
+`misc3` being full is what raised the question, but a spare lane would not have
+made it the right home: a `.json` config carries no image, so a config recording
+how large to draw one would be describing something that is not there. It rides
+`density.z` in the entity-update uniform, lives on the Orchestrator beside the
+source image, and travels in the share link *with* the image — the one transport
+that carries one.
+
+Two consequences worth knowing:
+
+- **A uniform, not a re-derive.** Rebuilding the gradient at a different
+  letterbox size is a full pass over a million texels per change, so a drag would
+  have run at a few frames a second — and `ev.last` cannot reliably distinguish a
+  released drag from a programmatic refresh to debounce against.
+- **The image has an EXTENT, and the world does not stop at it.** This is why
+  `get_density_gradient` calls `world_to_uv` bare where every other sampler in
+  `entityUpdate.wgsl` goes through `world_to_uv_bc`. Those read the canvas and
+  the strafe field, which *are* the world. Once the image is scaled below 1 there
+  is world outside it: clamping would smear its border texels into infinite
+  streaks and repeating would tile it across the plane. The field is simply zero
+  out there — the same thing the letterbox margin already is.
+
+**It is not reset when the image is cleared.** Dropping a second image over the
+first is the common gesture, and having a scale you just tuned snap back to 1
+every time would make the control useless for exactly that.
+
+### The image in the share link, but not in the QR
+
+A share link carries the dropped image. **A stamped share *image* does not**, and
+the asymmetry is forced rather than chosen: the stamp encodes the link as a QR
+code, which gives out after two or three configs — far below the link's own limit
+(`qrStamp.ts` raises `QrCapacityError` for it). Adding pixels would make every
+stamp fail, so `copyShareLink` passes the image and `copyShareImage` deliberately
+does not.
+
+**No codec version bump, and that is deliberate.** The block is appended after
+the notes, and `decodeDocument` checks the payload is *at least* long enough —
+never that it is exactly that long. So trailing bytes were already ignored, and a
+build predating this loads such a link as the config without the image, which is
+the correct degradation. Bumping would instead make those builds *refuse* a link
+they can very nearly read. A magic byte leads the block so a stray appended byte
+(base64 padding, a chat client's newline) is not read as a width.
+
+Three things about the payload:
+
+- **It is not compressed.** `encodeShareLink` base64s the bytes directly; the
+  lz-string path is the legacy `#c=` format only. Measured on this data lz-string
+  manages 1.4× on smooth input and *expands* incompressible input by 1.5× — it is
+  an LZW over 16-bit chars, not a byte compressor. So every byte costs 4/3 of a
+  character and the size is content-independent.
+- **A reduced copy: 128px max, 4 bits per pixel.** Spatial detail is worth more
+  than tonal detail here, and halving the depth buys the same bytes as dropping
+  to 96px would — 128px at 4 bits is *smaller* than 96px at 8 (8 KB against 9 KB)
+  with a third more linear resolution. Real numbers: a 96px image makes a
+  ~6.9 KB link, a full 128px one ~11.6 KB, against 674 characters with no image.
+- **The stretch happens BEFORE the quantization**, in `toGrayscaleThumbnail`, and
+  this is load-bearing rather than tidy. Sixteen levels across the full 0..255
+  range is only three or four levels across the range a cryo-ET slice actually
+  occupies — and low-contrast density data is the whole point of the feature, so
+  that is the common case. **Measured: quantizing without the stretch first moved
+  the recovered gradient by 9.4° on average; with it, 1.9°.**
+  `densityGradient.test.ts` pins that, so removing the stretch fails a test
+  rather than quietly degrading every shared link.
+
 ### Verifying it
 
 `node tools/densityCheck.mjs --keep-shots DIR` (with `npm run dev` running).
@@ -1013,9 +1085,17 @@ quadrant — asymmetric on both axes, so a y-flip, an x-mirror and a transpose a
 each visible and each distinguishable.
 
 The voting ones are that attraction fills the **upper**-left quadrant (measured:
-+2.8 there against +0.5 for the best other quadrant), that the lower-left does
++2.0 there against +0.6 for the best other quadrant), that the lower-left does
 *not* gain more (which is what a missing row flip looks like), and that a negative
 strength empties what a positive one fills.
+
+**The check that is the point** — in the sense `configCheck.mjs` means it — is
+the last one: an image dropped through the real listeners travels in a share
+link, the page is navigated to that link and rebuilt from nothing, and the image
+comes back with its scale exact. Everything before it passes just as well against
+an in-memory value. It is also where "the recipient gets what the sender had" is
+established rather than argued, since the link's copy is stretched and quantized
+on the way out.
 
 **The sense channel is advisory and does not vote**, for the reason
 `fieldCheck.mjs` gives for its pass 2. Its design is that the rule decides, and

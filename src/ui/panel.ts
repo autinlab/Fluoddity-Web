@@ -1673,7 +1673,11 @@ export class Panel {
               window.location.search,
             ),
           };
-    const url = buildShareUrl(loc, this.bus.projectDocument());
+    // THE IMAGE RIDES THE LINK, AND NOT THE QR. `copyShareImage` below builds
+    // its URL without one on purpose -- a stamp gives out after two or three
+    // configs, so 16 KB of pixels would make every stamp fail. The two
+    // transports differ in what they can carry, and this is the one that can.
+    const url = buildShareUrl(loc, this.bus.projectDocument(), this.bus.sharedDensityImage());
     void copyText(url).then((ok) => {
       this.showShareResult(ok, url);
     });
@@ -1756,6 +1760,8 @@ export class Panel {
       return;
     }
 
+    // NO DENSITY IMAGE HERE, unlike `copyShareLink`. See the note there and
+    // `qrStamp.ts`'s capacity error: the stamp cannot carry a second picture.
     const url = buildShareUrl(window.location, this.bus.projectDocument());
 
     // CAPACITY IS CHECKED FIRST, because a project too big for a QR is a real

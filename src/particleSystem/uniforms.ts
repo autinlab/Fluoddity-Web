@@ -47,7 +47,9 @@ import { PICK_UNIFORM_SIZE } from './pick.ts';
  *   world      : WorldData  (32)  offset 0
  *   canvas_res : vec4f      (16)  offset 32   xy: canvas   zw: strafe field
  *   shove      : vec4f      (16)  offset 48   xy: center   z: strength  w: size
- *   density    : vec4f      (16)  offset 64   xy: density field   zw: reserved
+ *   density    : vec4f      (16)  offset 64   xy: density field resolution
+ *                                            z: density image scale
+ *                                            w: reserved
  *   flags      : vec4f      (16)  offset 80   x: frame_count(i)
  *                                            y: strafe_active(i)
  *                                            z: density_active(i)
@@ -124,6 +126,17 @@ export function packEntityUpdateUniforms(
   strafeFieldActive: boolean,
   densityFieldRes: readonly [number, number],
   densityActive: boolean,
+  /**
+   * How much the dropped image is enlarged. 1 fits it to the world.
+   *
+   * NOT a `ConfigData` lane, and that is a deliberate placement rather than a
+   * shortage of lanes. It is a property of the IMAGE -- which is live-only state
+   * the Orchestrator owns and no save file carries -- so putting it in the
+   * config would mean a `.json` that records how big an image it does not
+   * contain should be drawn. It travels in the share link beside the image
+   * itself, which is the one transport that does carry one.
+   */
+  densityScale: number,
 ): ArrayBuffer {
   const { buffer, f32, i32 } = withWorld(world, ENTITY_UPDATE_UNIFORM_SIZE);
 
@@ -139,9 +152,10 @@ export function packEntityUpdateUniforms(
   f32[AFTER_WORLD + 6] = shove === null ? 0.0 : shove.strength;
   f32[AFTER_WORLD + 7] = shove === null ? 0.0 : shove.size;
 
-  // density: xy resolution, zw reserved
+  // density: xy resolution, z scale, w reserved
   f32[AFTER_WORLD + 8] = densityFieldRes[0];
   f32[AFTER_WORLD + 9] = densityFieldRes[1];
+  f32[AFTER_WORLD + 10] = densityScale;
 
   // flags: x frame_count(i), y strafe_field_active(i), z density_active(i),
   //        w reserved

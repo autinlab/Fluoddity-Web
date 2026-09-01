@@ -54,7 +54,7 @@ test('WorldData occupies offset 0 of every struct, byte for byte', () => {
   assert.equal(expected.length / 2, WORLD_DATA_SIZE);
 
   const buffers = [
-    packEntityUpdateUniforms(WORLD, [1024, 1024], [512, 512], 7, null, false, [1, 1], false),
+    packEntityUpdateUniforms(WORLD, [1024, 1024], [512, 512], 7, null, false, [1, 1], false, 1.0),
     packCanvasUniforms(WORLD, 7),
     packBrushUniforms(WORLD, [1024, 1024], 7),
   ];
@@ -88,7 +88,7 @@ test('frame 0 is representable, because it is the reset sentinel', () => {
 
 test('the entity-update canvas_res lane carries both resolutions', () => {
   const f32 = new Float32Array(
-    packEntityUpdateUniforms(WORLD, [1024, 768], [512, 256], 3, null, false, [256, 128], false),
+    packEntityUpdateUniforms(WORLD, [1024, 768], [512, 256], 3, null, false, [256, 128], false, 1.0),
   );
   const base = WORLD_DATA_SIZE / 4;
   assert.deepEqual([...f32.slice(base, base + 4)], [1024, 768, 512, 256]);
@@ -100,19 +100,29 @@ test('the density lane carries the density field\'s own resolution', () => {
   // value; here they are deliberately different in the call above, so a shared
   // lane could not satisfy both.
   const f32 = new Float32Array(
-    packEntityUpdateUniforms(WORLD, [1024, 768], [512, 256], 3, null, false, [256, 128], false),
+    packEntityUpdateUniforms(WORLD, [1024, 768], [512, 256], 3, null, false, [256, 128], false, 1.0),
   );
   const base = WORLD_DATA_SIZE / 4 + 8;
   assert.deepEqual([...f32.slice(base, base + 2)], [256, 128]);
 });
 
+test('the density scale rides the z lane of the density vec4', () => {
+  const f32 = new Float32Array(
+    packEntityUpdateUniforms(WORLD, [1, 1], [1, 1], 0, null, false, [64, 64], true, 2.5),
+  );
+  const base = WORLD_DATA_SIZE / 4 + 8;
+  // Beside the resolution rather than in `flags`, whose lanes are bit-cast
+  // ints -- a float there would be read as a nonsense integer.
+  assert.deepEqual([...f32.slice(base, base + 3)], [64, 64, 2.5]);
+});
+
 test('densityActive is its own int lane beside strafeFieldActive', () => {
   const base = WORLD_DATA_SIZE / 4 + 12;
   const off = new Int32Array(
-    packEntityUpdateUniforms(WORLD, [1, 1], [1, 1], 0, null, false, [8, 8], false),
+    packEntityUpdateUniforms(WORLD, [1, 1], [1, 1], 0, null, false, [8, 8], false, 1.0),
   );
   const on = new Int32Array(
-    packEntityUpdateUniforms(WORLD, [1, 1], [1, 1], 0, null, false, [8, 8], true),
+    packEntityUpdateUniforms(WORLD, [1, 1], [1, 1], 0, null, false, [8, 8], true, 1.0),
   );
   // flags.z. The two flags must be independent: a shared lane would make
   // painting the strafe field switch the density image on.
@@ -123,7 +133,7 @@ test('densityActive is its own int lane beside strafeFieldActive', () => {
 
 test('a null shove writes zeroes, not stale values', () => {
   const f32 = new Float32Array(
-    packEntityUpdateUniforms(WORLD, [1024, 1024], [1, 1], 5, null, false, [1, 1], false),
+    packEntityUpdateUniforms(WORLD, [1024, 1024], [1, 1], 5, null, false, [1, 1], false, 1.0),
   );
   const base = WORLD_DATA_SIZE / 4 + 4;
   assert.deepEqual([...f32.slice(base, base + 4)], [0, 0, 0, 0]);
@@ -132,7 +142,7 @@ test('a null shove writes zeroes, not stale values', () => {
 test('a live shove writes centre, strength and size', () => {
   const shove = { center: [0.25, -0.5] as const, strength: -0.004, size: 0.1 };
   const f32 = new Float32Array(
-    packEntityUpdateUniforms(WORLD, [1024, 1024], [1, 1], 5, shove, true, [1, 1], false),
+    packEntityUpdateUniforms(WORLD, [1024, 1024], [1, 1], 5, shove, true, [1, 1], false, 1.0),
   );
   const base = WORLD_DATA_SIZE / 4 + 4;
   // 0.25 and -0.5 are exact in binary, so these compare exactly.
@@ -151,10 +161,10 @@ test('strafeFieldActive is an int lane, and false really is 0', () => {
   // any real texture -- the strafe field would then look permanently active.
   const base = WORLD_DATA_SIZE / 4 + 12;
   const off = new Int32Array(
-    packEntityUpdateUniforms(WORLD, [1, 1], [1, 1], 0, null, false, [1, 1], false),
+    packEntityUpdateUniforms(WORLD, [1, 1], [1, 1], 0, null, false, [1, 1], false, 1.0),
   );
   const on = new Int32Array(
-    packEntityUpdateUniforms(WORLD, [1, 1], [1, 1], 0, null, true, [1, 1], false),
+    packEntityUpdateUniforms(WORLD, [1, 1], [1, 1], 0, null, true, [1, 1], false, 1.0),
   );
   assert.equal(off[base + 1], 0);
   assert.equal(on[base + 1], 1);

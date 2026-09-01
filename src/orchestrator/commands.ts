@@ -51,6 +51,7 @@ import type { Preferences } from '../prefs/preferences.ts';
 // redeclared. It is a DOM-free value (width, height, RGBA bytes), which is what
 // makes it usable on this boundary at all.
 import type { RgbaImage } from '../share/qrRender.ts';
+import type { SharedImage } from '../config/shareCodec.ts';
 
 /**
  * What the mouse does on the canvas. The active TOOL.
@@ -389,6 +390,18 @@ export type Command =
       readonly name: string;
     }
   | { readonly kind: 'clearDensityImage' }
+  /**
+   * How much the dropped image is enlarged.
+   *
+   * Its own command rather than an `editSetting`, because it is not a `Setting`:
+   * the registry's three sources are CONFIG, WORLD and PREFS, and this is none
+   * of them. It belongs to the IMAGE -- live-only state the Orchestrator owns --
+   * so forcing it into one of the three would be a lie about what it is and
+   * where it is saved. See `densityScale.ts`.
+   *
+   * Not recorded in history, like the image it describes.
+   */
+  | { readonly kind: 'setDensityScale'; readonly value: number }
   // --- view mode ------------------------------------------------------------
   // Its own command rather than a case of `editDrawPref`: see `ViewPrefField`.
   // Never recorded in history -- these say how you are LOOKING at the project,
@@ -698,6 +711,9 @@ export interface Status {
    */
   readonly densityImageName: string;
 
+  /** How much the loaded image is enlarged. See `densityScale.ts`. */
+  readonly densityScale: number;
+
   /**
    * The three settings sources, as plain records the panel reads by field name.
    *
@@ -785,6 +801,19 @@ export interface CommandBus {
    * these bytes mean and this is only the thing that carries them.
    */
   projectDocument(): unknown;
+
+  /**
+   * A reduced copy of the dropped density image, for the share link.
+   *
+   * A PULL like `projectDocument`, and for the same reason: it is derived on
+   * demand and nobody needs it per frame. It also must NOT be on `Status` --
+   * building a thumbnail is a full pass over the source image, and `Status` is
+   * rebuilt every frame.
+   *
+   * `null` when nothing is dropped. The QR path ignores this entirely; see
+   * `encodeShareLink`.
+   */
+  sharedDensityImage(): SharedImage | null;
 
   /**
    * The live editor preferences.

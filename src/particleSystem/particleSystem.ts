@@ -182,6 +182,8 @@ export class ParticleSystem {
    * view being non-null.
    */
   private densityActive = false;
+  /** See `packEntityUpdateUniforms`. 1 fits the image to the world. */
+  private densityScaleValue = 1.0;
   /** False while the placeholder is bound; the shader then skips the sample. */
   private strafeFieldBound = false;
 
@@ -666,6 +668,20 @@ export class ParticleSystem {
    */
   setDensityActive(active: boolean): void {
     this.densityActive = active;
+  }
+
+  /**
+   * How much the dropped image is enlarged. Uniform only -- no bind group, no
+   * texture, no re-derive, which is what makes it usable as a live slider.
+   *
+   * The alternative was to rebuild the gradient at a different letterbox size on
+   * the host. That is a full pass over a million texels (blur, Sobel, resample)
+   * per change, so a drag would have stuttered at a few frames a second, and
+   * `ev.last` cannot reliably tell a released drag from a programmatic refresh
+   * to debounce it against (see the panel's notes).
+   */
+  setDensityScale(scale: number): void {
+    this.densityScaleValue = scale;
   }
 
   /**
@@ -1172,6 +1188,7 @@ export class ParticleSystem {
             // bites -- see densitySize.ts on why that cap is not the same one.
             this.densityFieldSize,
             this.densityActive,
+            this.densityScaleValue,
           ),
         ),
         i * this.entityUpdateStride,

@@ -31,6 +31,10 @@ import { type ControlBinding, addControl } from '../controls.ts';
 import { CONFIG, WORLD, grouped } from '../settingsSpec.ts';
 import { addAdvancedToggle } from '../advancedToggle.ts';
 import { type SectionContext, type SectionHandle, bindingsOnly } from './section.ts';
+import {
+  DENSITY_SCALE_MAX,
+  DENSITY_SCALE_MIN,
+} from '../../densityField/densityScale.ts';
 
 /**
  * The folder header, naming the project the controls below are editing.
@@ -157,9 +161,36 @@ function addDensityImageRow(
   ctx: SectionContext,
 ): (s: Status) => void {
   const proxy = { image: status.densityImageName || NO_IMAGE };
-  const readout = folder.addBinding(proxy, 'image', {
-    readonly: true,
-    label: 'Loaded',
+  folder.addBinding(proxy, 'image', { readonly: true, label: 'Loaded' });
+
+  // THE SCALE. A bespoke slider rather than a registry entry, because a
+  // `Setting` must declare one of three sources -- CONFIG, WORLD or PREFS -- and
+  // this is none of them: it belongs to the dropped image, which no save file
+  // carries. Putting it in the registry would have bought the tier and gating
+  // machinery at the cost of the field claiming to be saved somewhere it is not.
+  const scaleProxy = { scale: status.densityScale };
+  const scale = folder.addBinding(scaleProxy, 'scale', {
+    label: 'Image Scale',
+    min: DENSITY_SCALE_MIN,
+    max: DENSITY_SCALE_MAX,
+    step: 0.05,
+  });
+  scale.on('change', (ev) => {
+    // `isRefreshing()` FIRST, before anything reads `ev`. This is the retained-
+    // mode guard every dispatching handler in the panel needs: `pane.refresh()`
+    // emits `change` with `last: true`, indistinguishable from a released drag,
+    // so without this a status push would feed the value straight back as a user
+    // edit. See panel.ts's notes on the feedback loop.
+    if (ctx.isRefreshing()) return;
+    ctx.send({ kind: 'setDensityScale', value: ev.value as number });
+  });
+  ctx.tooltip.attach(scale.element as HTMLElement, {
+    title: 'Image Scale',
+    body:
+      'How large the dropped image is drawn across the world. 1 fits the whole ' +
+      'image; higher values enlarge it so its structure is coarser than the ' +
+      'particles and the bias reads as shape rather than texture. Below 1 the ' +
+      'image occupies part of the world and the rest feels no field at all.',
   });
 
   const clear = folder.addButton({ title: 'Clear Image (not undoable)' });
@@ -176,15 +207,27 @@ function addDensityImageRow(
   // WRITTEN ON AN ACTUAL CHANGE, not every frame -- `refresh()` touches the DOM,
   // and this runs at 60fps for a string that changes when a file is dropped.
   // Same instinct as the folder title above.
-  let shown = proxy.image;
+  // PROXY WRITES ONLY -- no `refresh()` call on either binding.
+  //
+  // `Panel.refresh` sets its `refreshing` flag, calls every section's updater
+  // (this one), and only then calls `pane.refresh()` on the whole pane. So a
+  // value written here reaches the widget through that global refresh, still
+  // inside the flag's window -- which is what makes the `isRefreshing()` guard in
+  // the slider's handler catch the `change` it provokes. Refreshing the binding
+  // by hand here would work too and would be the second way to do one thing.
+  //
+  // Same shape `drawingSection.ts` uses for its preference proxies.
+  let shownName = proxy.image;
+  let shownScale = scaleProxy.scale;
   return (s) => {
+    if (s.densityScale !== shownScale) {
+      shownScale = s.densityScale;
+      scaleProxy.scale = s.densityScale;
+    }
     const next = s.densityImageName || NO_IMAGE;
-    if (next === shown) return;
-    shown = next;
-    proxy.image = next;
-    // No `isRefreshing` guard needed here and deliberately none added: a
-    // readonly monitor dispatches nothing, so there is no feedback loop for one
-    // to break. Adding a guard anyway would suggest there is.
-    readout.refresh();
+    if (next !== shownName) {
+      shownName = next;
+      proxy.image = next;
+    }
   };
 }

@@ -12,7 +12,10 @@ name: Deploy to GitHub Pages
 
 on:
   push:
-    branches: [All-Web]
+    # `density-image` is this fork's publishing branch. `All-Web` is upstream's
+    # (aphid91/Fluoddity-Web) and is kept here only as the merge base -- pushing
+    # it from this fork should NOT republish, so it is deliberately not listed.
+    branches: [density-image]
   # So the site can be republished without an empty commit.
   workflow_dispatch:
 

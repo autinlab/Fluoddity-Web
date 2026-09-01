@@ -88,7 +88,14 @@
 // below goes through the two consts.
 import * as LZStringNS from 'lz-string';
 
-import { ShareCodecError, decodeDocument, encodeDocument } from './shareCodec.ts';
+import {
+  ShareCodecError,
+  type SharedImage,
+  decodeDocument,
+  decodeImageBlock,
+  encodeDocument,
+  encodeImageBlock,
+} from './shareCodec.ts';
 
 type LZStringApi = {
   compressToEncodedURIComponent(input: string): string;
@@ -237,9 +244,58 @@ function base64UrlToBytes(text: string): Uint8Array {
  * makes a ~530-character one as bytes. `shareCodec.ts`'s header has the
  * measurements and the reason compression was not stacked on top.
  */
-export function encodeShareLink(document: unknown): string {
+export function encodeShareLink(
+  document: unknown,
+  /**
+   * A reduced copy of the dropped density image, or `null` for none.
+   *
+   * OPTIONAL, AND THE QR PATH PASSES NOTHING. A stamped share image carries the
+   * link as a QR code, which gives out after two or three configs -- far below
+   * the link's own limit (see `qrStamp.ts`'s capacity error). Adding 16 KB of
+   * pixels would make every stamp fail, so the two transports genuinely differ
+   * in what they can carry, and this is where that is decided.
+   */
+  image: SharedImage | null = null,
+): string {
+  const payload = encodeDocument(document);
+  const bytes =
+    image === null
+      ? payload
+      : concatBytes(payload, encodeImageBlock(image));
   // No `encodeURIComponent` here. See trap 1 in the file header.
-  return `#${PREFIX_BINARY}${bytesToBase64Url(encodeDocument(document))}`;
+  return `#${PREFIX_BINARY}${bytesToBase64Url(bytes)}`;
+}
+
+/** Two byte arrays, joined. */
+function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+/**
+ * The density image a fragment carries, or `null`.
+ *
+ * A SECOND ENTRY POINT rather than a wider return type on `decodeShareLink`,
+ * which stays exactly what it was: the document. An image is not a field of a v8
+ * document, and threading a tuple out of there would make every caller and every
+ * test destructure a pair to get the thing they already wanted.
+ *
+ * NEVER THROWS -- see `decodeImageBlock`. A fragment that is not ours, a payload
+ * that will not decompress, a mangled tail: all `null`, because the CONFIG is
+ * what a link is for and it should open with or without the picture.
+ */
+export function decodeShareImage(hash: string): SharedImage | null {
+  const body = hash.startsWith('#') ? hash.slice(1) : hash;
+  if (!body.startsWith(PREFIX_BINARY)) return null;
+  const payload = body.slice(PREFIX_BINARY.length);
+  if (payload === '') return null;
+  try {
+    return decodeImageBlock(base64UrlToBytes(payload));
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -379,6 +435,8 @@ export function decodeShareText(text: string): unknown | null {
 export function buildShareUrl(
   loc: { readonly origin: string; readonly pathname: string; readonly search: string },
   document: unknown,
+  /** See `encodeShareLink`. The QR path deliberately omits this. */
+  image: SharedImage | null = null,
 ): string {
-  return `${loc.origin}${loc.pathname}${loc.search}${encodeShareLink(document)}`;
+  return `${loc.origin}${loc.pathname}${loc.search}${encodeShareLink(document, image)}`;
 }

@@ -88,7 +88,9 @@ import {
 } from '../recorder/recordingSettings.ts';
 import { StrafeField } from '../strafeField/strafeField.ts';
 import { DensityField } from '../densityField/densityField.ts';
-import { densityGradient } from '../densityField/densityGradient.ts';
+import { densityGradient, toGrayscaleThumbnail } from '../densityField/densityGradient.ts';
+import { SHARE_IMAGE_MAX_DIM, type SharedImage } from '../config/shareCodec.ts';
+import { DENSITY_SCALE_DEFAULT, clampDensityScale } from '../densityField/densityScale.ts';
 import type { RgbaImage } from '../share/qrRender.ts';
 import { screenToWorld, worldToUv } from '../particleSystem/coords.ts';
 import {
@@ -237,6 +239,16 @@ export class Orchestrator implements CommandBus {
   private densityField: DensityField;
   private densityImage: RgbaImage | null = null;
   private densityImageName = '';
+  /**
+   * NOT reset when the image is cleared, and deliberately.
+   *
+   * Dropping a second image over the first is the common gesture -- you are
+   * comparing two slices, or replacing one you mis-cropped -- and having the
+   * scale you just tuned snap back to 1 every time would make the control
+   * useless for exactly that. It is a property of how you are LOOKING at
+   * whatever is dropped, and that intent survives the swap.
+   */
+  private densityScale = DENSITY_SCALE_DEFAULT;
 
   /**
    * Where the cursor was on the previous frame of the stroke in progress, in
@@ -2451,6 +2463,13 @@ export class Orchestrator implements CommandBus {
         );
         return;
 
+      case 'setDensityScale':
+        // Clamped here rather than trusted: the panel cannot send an out-of-range
+        // value, but a share link can, and this is the one place both arrive.
+        this.densityScale = clampDensityScale(command.value);
+        this.system.setDensityScale(this.densityScale);
+        return;
+
       case 'clearDensityImage':
         // NOT in the undo timeline, for exactly the reasons `clearStrafeField`
         // below is not: the image is live-only state that no restart preserves,
@@ -2847,6 +2866,10 @@ export class Orchestrator implements CommandBus {
       replacementDensity.size,
       replacementDensity.active,
     );
+    // The replacement starts at ITS OWN default, so the tuned scale has to be
+    // carried across explicitly -- the same reason the image is re-derived above
+    // rather than assumed to survive.
+    replacement.setDensityScale(this.densityScale);
 
     replacement.applyProject(this.project.configs, this.project.world);
 
@@ -2988,6 +3011,7 @@ export class Orchestrator implements CommandBus {
       saveError: this.saveError,
       configBusy: this.configBusy,
       densityImageName: this.densityImageName,
+      densityScale: this.densityScale,
 
       // Read from `prefs` directly, NOT from `settingsSources()` -- which is
       // empty while the panel is closed. See the `Status` field comments.
@@ -3015,6 +3039,26 @@ export class Orchestrator implements CommandBus {
    * NO CAMERA, for the reason `SavedConfig` gives: where you were standing is
    * not a property of what you built.
    */
+  /**
+   * The dropped image, reduced for a share link. See `CommandBus`.
+   *
+   * Derived here rather than cached, because it is wanted once per copied link
+   * and the source is already held. Caching it would mean invalidating on both a
+   * drop and a clear for a value nothing reads in between.
+   */
+  sharedDensityImage(): SharedImage | null {
+    if (this.densityImage === null) return null;
+    const thumb = toGrayscaleThumbnail(this.densityImage, SHARE_IMAGE_MAX_DIM);
+    return {
+      width: thumb.width,
+      height: thumb.height,
+      gray: thumb.data,
+      // Carried WITH the image because it describes the image. It is not in any
+      // config, so this is the only transport that can restore it.
+      scale: this.densityScale,
+    };
+  }
+
   projectDocument(): unknown {
     return toDocument(this.project.configs, this.project.world);
   }

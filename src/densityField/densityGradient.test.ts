@@ -13,7 +13,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { DENSITY_BLUR_SIGMA, densityGradient } from './densityGradient.ts';
+import {
+  DENSITY_BLUR_SIGMA,
+  densityGradient,
+  fromGrayscale,
+  toGrayscaleThumbnail,
+} from './densityGradient.ts';
 import type { RgbaImage } from '../share/qrRender.ts';
 
 /** An image built from a per-pixel 0..255 grey function of (x, y), y DOWN. */
@@ -278,6 +283,73 @@ test('the blur makes the gradient follow real structure instead of noise', () =>
     `smoothing must concentrate the gradient on the real edge: ` +
       `raw ${raw.toFixed(2)} vs smoothed ${smoothed.toFixed(2)}`,
   );
+});
+
+test('quantizing to 16 grey levels barely moves the gradient field', () => {
+  // THE CLAIM THE SHARE LINK'S 4-BIT PACKING RESTS ON (`SHARE_IMAGE_LEVELS` in
+  // shareCodec.ts). Halving the bit depth is what keeps a shared link pasteable,
+  // and it is only defensible if the field the recipient gets is the field the
+  // sender had.
+  //
+  // The reason it holds is the order of operations here: a percentile contrast
+  // stretch renormalizes absolute levels, and a Gaussian blur smooths the
+  // terracing below the Sobel's own scale. So this is a test OF THAT ORDER as
+  // much as of the quantization -- move the blur after the gradient and it fails.
+  const soft = (x: number, y: number): number => {
+    // Smooth and low-contrast, which is the case quantization could hurt: a
+    // hard-edged mask survives any bit depth trivially.
+    const r = Math.hypot(x - 32, y - 32);
+    return 110 + 40 * Math.exp(-(r * r) / 400) + 8 * Math.sin(x / 5);
+  };
+  const source = greyImage(64, 64, soft);
+  const full = densityGradient(source, [64, 64]);
+
+  // THE EXACT ROUND TRIP A LINK PERFORMS: thumbnail (which stretches), then the
+  // codec's 8 -> 4 -> 8 quantization, then back to an image.
+  //
+  // Going through `toGrayscaleThumbnail` rather than quantizing the raw fixture
+  // is the point: the stretch inside it is what makes sixteen levels enough, and
+  // a test that skipped it would be testing a path no link takes.
+  const thumb = toGrayscaleThumbnail(source, 64);
+  const requantized = new Uint8Array(thumb.data.length);
+  for (let i = 0; i < thumb.data.length; i++) {
+    requantized[i] = Math.round(((thumb.data[i]! >> 4) * 255) / 15);
+  }
+  const quantized = densityGradient(
+    fromGrayscale(thumb.width, thumb.height, requantized),
+    [64, 64],
+  );
+
+  // Compared by ANGLE, on texels that carry real signal. Magnitude is
+  // peak-normalized on both sides, so an angle is what says "particles are
+  // pushed the same way" -- which is the only property the field has to keep.
+  let worst = 0;
+  let sum = 0;
+  let n = 0;
+  for (let i = 0; i < full.data.length; i += 2) {
+    const ax = full.data[i]!;
+    const ay = full.data[i + 1]!;
+    const magA = Math.hypot(ax, ay);
+    if (magA < 0.1) continue; // no meaningful direction to compare
+    const bx = quantized.data[i]!;
+    const by = quantized.data[i + 1]!;
+    const magB = Math.hypot(bx, by);
+    if (magB === 0) {
+      worst = 180;
+      continue;
+    }
+    const cos = Math.min(1, Math.max(-1, (ax * bx + ay * by) / (magA * magB)));
+    const deg = (Math.acos(cos) * 180) / Math.PI;
+    worst = Math.max(worst, deg);
+    sum += deg;
+    n++;
+  }
+  assert.ok(n > 100, `expected a populated field to compare, got ${n} texels`);
+  const mean = sum / n;
+  // Measured at 1.9 degrees with the stretch in place, and 9.4 without it -- so
+  // this threshold is what actually catches the stretch being removed.
+  assert.ok(mean < 3, `mean angular error ${mean.toFixed(2)} degrees`);
+  assert.ok(worst < 30, `worst angular error ${worst.toFixed(2)} degrees`);
 });
 
 test('the same input gives the same field every time', () => {

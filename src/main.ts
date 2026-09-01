@@ -23,7 +23,8 @@ import { acquireDevice, showUnavailableOverlay, WebGPUUnavailable } from './gpu/
 import { createSurface, type Surface } from './app/surface.ts';
 import { CAMERA_MODES, type CameraMode } from './camera/cameraState.ts';
 import { type SavedConfig, fromDocument } from './config/persistence.ts';
-import { SHARED_LINK_NAME, decodeShareLink } from './config/shareLink.ts';
+import { SHARED_LINK_NAME, decodeShareImage, decodeShareLink } from './config/shareLink.ts';
+import { fromGrayscale } from './densityField/densityGradient.ts';
 import {
   describeChanges,
   hasProposedSettings,
@@ -685,6 +686,28 @@ async function start(): Promise<void> {
       orchestrator.reportDropError(message);
     },
   });
+
+  // A DENSITY IMAGE CARRIED BY THE SHARE LINK.
+  //
+  // Applied HERE rather than up beside `decodeShareLink`, because that runs
+  // before the Orchestrator exists -- the link's CONFIG has to be known that
+  // early (it decides the world the system is built for), and the image does
+  // not: it is a texture upload with no bearing on sizing.
+  //
+  // `decodeShareImage` never throws, so this needs no try/catch and no error
+  // banner. A mangled tail loads the project without the picture, which is the
+  // right degradation: the config is what a link is for.
+  const sharedImage = decodeShareImage(window.location.hash);
+  if (sharedImage !== null) {
+    // The scale FIRST, so the image is never drawn for a frame at the wrong
+    // size before the slider catches up.
+    orchestrator.dispatch({ kind: 'setDensityScale', value: sharedImage.scale });
+    orchestrator.dispatch({
+      kind: 'loadDensityImage',
+      image: fromGrayscale(sharedImage.width, sharedImage.height, sharedImage.gray),
+      name: 'shared image',
+    });
+  }
 
   // --- touch ----------------------------------------------------------------
   //

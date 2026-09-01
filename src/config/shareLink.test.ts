@@ -37,13 +37,22 @@ import * as LZStringNS from 'lz-string';
 
 import { BC, IC } from '../particleSystem/config.ts';
 import { ConfigFormatError, fromDocument, toDocument } from './persistence.ts';
-import { CODEC_VERSION, decodeDocument, encodeDocument } from './shareCodec.ts';
+import {
+  CODEC_VERSION,
+  SHARE_IMAGE_MAX_DIM,
+  type SharedImage,
+  decodeDocument,
+  decodeImageBlock,
+  encodeDocument,
+  encodeImageBlock,
+} from './shareCodec.ts';
 import {
   SHARE_LINK_WARN_LENGTH,
   ShareLinkError,
   buildShareUrl,
   decodeShareLink,
   decodeShareText,
+  decodeShareImage,
   encodeShareLink,
 } from './shareLink.ts';
 
@@ -181,6 +190,152 @@ test('a version-1 link decodes every field before the appended ones unchanged', 
   const fromV2 = decodeDocument(encodeDocument(doc)) as Record<string, unknown>;
   const fromV1 = decodeDocument(downgradeToV1(encodeDocument(doc))) as Record<string, unknown>;
   assert.deepEqual(fromV1, fromV2);
+});
+
+// ---------------------------------------------------------------------------
+// THE DENSITY IMAGE BLOCK
+// ---------------------------------------------------------------------------
+
+/** A greyscale fixture with structure on both axes, so a transpose is visible. */
+function sharedImageFixture(w = 24, h = 16): SharedImage {
+  const gray = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) gray[y * w + x] = (x * 7 + y * 13) & 0xff;
+  }
+  return { width: w, height: h, gray, scale: 2.75 };
+}
+
+test('an image round-trips through a link, quantized to 16 levels', () => {
+  // LOSSY BY DESIGN, and the assertion says so rather than tolerating a fuzz.
+  // 4 bits per pixel is what keeps the URL pasteable; `SHARE_IMAGE_LEVELS` in
+  // the codec explains why the receiving end cannot tell (it contrast-stretches
+  // and blurs before differentiating).
+  const image = sharedImageFixture();
+  const hash = encodeShareLink(validDocument(), image);
+  const back = decodeShareImage(hash);
+  assert.ok(back !== null, 'the image must come back');
+  assert.equal(back.width, image.width);
+  assert.equal(back.height, image.height);
+
+  const expected = [...image.gray].map((v) => Math.round(((v >> 4) * 255) / 15));
+  assert.deepEqual([...back.gray], expected);
+
+  // float32, so the scale is compared against its float32 rounding rather than
+  // an epsilon -- the same discipline the shove lanes use.
+  assert.equal(back.scale, Math.fround(image.scale));
+});
+
+test('the quantization is exactly invertible at the ends of the range', () => {
+  // Black stays black and WHITE STAYS WHITE. `<< 4` instead of `* 255 / 15`
+  // would cap at 240 and darken every shared image by 6% -- invisible on its own
+  // and a systematic shift in every gradient built from it.
+  const gray = new Uint8Array([0, 255, 16, 240]);
+  const back = decodeShareImage(
+    encodeShareLink(validDocument(), { width: 4, height: 1, gray, scale: 1 }),
+  );
+  assert.ok(back !== null);
+  assert.equal(back.gray[0], 0);
+  assert.equal(back.gray[1], 255);
+});
+
+test('an odd pixel count packs and unpacks without losing the last one', () => {
+  // Two pixels to a byte, so a 3x1 image needs a rounded-up byte and the tail
+  // nibble is padding. Off-by-one here drops the final pixel silently.
+  const gray = new Uint8Array([0, 128, 255]);
+  const back = decodeShareImage(
+    encodeShareLink(validDocument(), { width: 3, height: 1, gray, scale: 1 }),
+  );
+  assert.ok(back !== null);
+  assert.equal(back.gray.length, 3);
+  assert.equal(back.gray[2], 255);
+});
+
+test('the DOCUMENT still decodes when an image block is appended', () => {
+  // THE COMPATIBILITY CLAIM, and the reason there is no codec bump: the block
+  // sits past everything `decodeDocument` reads, and that function checks the
+  // payload is at least long enough -- never that it is exactly that long.
+  const doc = validDocument();
+  const withImage = encodeShareLink(doc, sharedImageFixture());
+  const without = encodeShareLink(doc, null);
+  assert.deepEqual(decodeShareLink(withImage), decodeShareLink(without));
+});
+
+test('a link with no image reports none rather than a blank one', () => {
+  assert.equal(decodeShareImage(encodeShareLink(validDocument())), null);
+  assert.equal(decodeShareImage(encodeShareLink(validDocument(), null)), null);
+});
+
+test('decodeShareImage returns null for anything that is not our link', () => {
+  // Never throws -- the config is what a link is for, and it should open with or
+  // without the picture. Every one of these is a `null`, not an exception.
+  for (const hash of ['', '#', '#other=1', '#c=garbage', '#b=!!!not-base64!!!', 'plain text']) {
+    assert.equal(decodeShareImage(hash), null, JSON.stringify(hash));
+  }
+});
+
+test('a truncated image tail is dropped and the config still loads', () => {
+  // The realistic failure: a chat client cut the URL short. The pixels are gone
+  // but the config in front of them is intact, so the link must still open.
+  const full = encodeShareLink(validDocument(), sharedImageFixture());
+  const cut = full.slice(0, full.length - 40);
+  assert.equal(decodeShareImage(cut), null);
+  assert.deepEqual(decodeShareLink(cut), decodeShareLink(encodeShareLink(validDocument())));
+});
+
+test('a stray trailing byte is not mistaken for an image', () => {
+  // Without the magic byte this would be read as a width and the decoder would
+  // go looking for megabytes of pixels that are not there.
+  const payload = encodeDocument(validDocument());
+  const junk = new Uint8Array(payload.length + 1);
+  junk.set(payload, 0);
+  junk[payload.length] = 0x20; // a space, which is what an appended newline looks like
+  assert.equal(decodeImageBlock(junk), null);
+});
+
+test('a block claiming more pixels than it carries is refused', () => {
+  // width and height are uint16, so a corrupt pair can claim four billion
+  // pixels. The length check has to come before any allocation.
+  const image = sharedImageFixture();
+  const bytes = encodeImageBlock(image);
+  const view = new DataView(bytes.buffer);
+  view.setUint16(1, 60000, true);
+  const payload = encodeDocument(validDocument());
+  const joined = new Uint8Array(payload.length + bytes.length);
+  joined.set(payload, 0);
+  joined.set(bytes, payload.length);
+  assert.equal(decodeImageBlock(joined), null);
+});
+
+test('a full-size shared image keeps the URL pasteable', () => {
+  // THE BUDGET THIS FEATURE LIVES INSIDE. A share link is something someone
+  // pastes into a message box, so the size is a design constraint rather than an
+  // implementation detail -- and it is worth failing here if it ever doubles.
+  //
+  // A worst-case fixture: pseudo-random bytes, which lz-string cannot compress.
+  // Real density data is smooth and does much better, so this is a ceiling.
+  let seed = 7;
+  const n = SHARE_IMAGE_MAX_DIM * SHARE_IMAGE_MAX_DIM;
+  const gray = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    gray[i] = seed >>> 24;
+  }
+  const url = encodeShareLink(validDocument(), {
+    width: SHARE_IMAGE_MAX_DIM,
+    height: SHARE_IMAGE_MAX_DIM,
+    gray,
+    scale: 1,
+  });
+  // Browsers accept far more than this; the limit that matters is what survives
+  // being pasted through a chat client, and 16k is the conservative figure.
+  //
+  // The payload is NOT compressed (see SHARE_IMAGE_MAX_DIM), so this number does
+  // not depend on the image's content -- which is why the incompressible fixture
+  // above is the real measurement rather than a pessimistic one.
+  assert.ok(
+    url.length < 16_000,
+    `a ${SHARE_IMAGE_MAX_DIM}px image made a ${url.length}-char link`,
+  );
 });
 
 test('a codec version this build does not know is refused', () => {

@@ -490,3 +490,173 @@ export function decodeDocument(bytes: Uint8Array): unknown {
   if (notes !== '') doc['notes'] = notes;
   return doc;
 }
+
+// ---------------------------------------------------------------------------
+// THE DENSITY IMAGE BLOCK
+// ---------------------------------------------------------------------------
+//
+// APPENDED AFTER THE NOTES, WHICH IS WHY THERE IS NO VERSION BUMP.
+//
+// `decodeDocument` reads the notes and returns; it checks that the payload is at
+// least as long as it needs and never that it is exactly that long. So trailing
+// bytes are already ignored, and a build that predates this block loads such a
+// link as the config without the image -- which is the correct degradation, not
+// an error. Bumping the codec would instead make those builds REFUSE a link they
+// can very nearly read.
+//
+// The block is read by its own function rather than folded into
+// `decodeDocument`. That keeps the document a v8 document: an image is not one of
+// its fields, and `fromDocument` would have to learn to ignore a key that no
+// save file can contain.
+
+/**
+ * Longest edge of the copy that travels in a link.
+ *
+ * A URL-LENGTH BUDGET, not a quality choice, and the numbers are worth stating
+ * because the binary payload is NOT compressed: `encodeShareLink` base64-encodes
+ * the bytes directly, so every byte here costs 4/3 of a character. (lz-string is
+ * the LEGACY `#c=` path only, and measured on this data it manages 1.4x on
+ * smooth input and EXPANDS incompressible input by 1.5x -- it is an LZW over
+ * 16-bit chars, not a byte compressor.)
+ *
+ * At 4 bits per pixel (see below) 128px is 8 KB, which base64s to ~11 KB and
+ * leaves a whole link near 12 KB. Well inside what a browser accepts, and inside
+ * what survives a paste through a chat client.
+ */
+export const SHARE_IMAGE_MAX_DIM = 128;
+
+/**
+ * Grey levels a shared image keeps: 16, packed two pixels to a byte.
+ *
+ * ## SPATIAL DETAIL IS WORTH MORE THAN TONAL DETAIL HERE, and that is the trade
+ *
+ * Halving the bit depth buys the same bytes as dropping to 96px would, and 128px
+ * at 4 bits is SMALLER than 96px at 8 (8 KB against 9 KB) while carrying a third
+ * more linear resolution. The reason it costs nothing visible is the receiving
+ * end: `densityGradient` runs a percentile contrast stretch and then a Gaussian
+ * blur BEFORE the Sobel, so absolute levels are renormalized and the terracing
+ * quantization introduces is smoothed below the gradient's own scale.
+ *
+ * What it would break is an image whose meaning is in fine tonal gradations
+ * across a flat field -- but that is exactly what a blurred gradient discards
+ * anyway, so there is no configuration in which the extra bits reach a particle.
+ *
+ * `densityGradient.test.ts` pins the claim rather than asserting it: it compares
+ * a 16-level gradient field against the full-depth one.
+ */
+const SHARE_IMAGE_LEVELS = 16;
+
+/**
+ * Leading byte of the block, so a stray trailing byte is not read as an image.
+ *
+ * A payload can acquire trailing bytes innocently -- base64 padding decoded by a
+ * lenient implementation, or a chat client appending whitespace. Without a magic
+ * byte, one such byte would be read as a width and the decoder would go looking
+ * for megabytes of pixels.
+ */
+const IMAGE_MAGIC = 0xd1;
+
+/** width(2) + height(2) + scale(4), then the packed 4-bit pixels. */
+const IMAGE_HEADER_BYTES = 1 + 2 + 2 + 4;
+
+/** Bytes the pixels occupy at 4 bits each, rounded up for an odd count. */
+function packedPixelBytes(width: number, height: number): number {
+  return Math.ceil((width * height) / 2);
+}
+
+export interface SharedImage {
+  readonly width: number;
+  readonly height: number;
+  /** `width * height` greyscale bytes. */
+  readonly gray: Uint8Array;
+  /** The Image Scale slider's value. See `densityScale.ts`. */
+  readonly scale: number;
+}
+
+/** The block, ready to concatenate onto an `encodeDocument` payload. */
+export function encodeImageBlock(image: SharedImage): Uint8Array {
+  const pixels = image.width * image.height;
+  const out = new Uint8Array(
+    IMAGE_HEADER_BYTES + packedPixelBytes(image.width, image.height),
+  );
+  const view = new DataView(out.buffer);
+  view.setUint8(0, IMAGE_MAGIC);
+  view.setUint16(1, image.width, true);
+  view.setUint16(3, image.height, true);
+  // float32, not float64: the value is a slider position between 0.2 and 6, so
+  // four bytes carry it to more precision than the control can express.
+  view.setFloat32(5, image.scale, true);
+
+  // Two pixels per byte, low nibble first. `>> 4` rather than a divide-and-round
+  // so the mapping is exactly the inverse of the `* 17` below: 255 -> 15 -> 255.
+  for (let i = 0; i < pixels; i++) {
+    const level = (image.gray[i] ?? 0) >> 4;
+    const at = IMAGE_HEADER_BYTES + (i >> 1);
+    out[at] = i % 2 === 0 ? level : (out[at] ?? 0) | (level << 4);
+  }
+  return out;
+}
+
+/**
+ * The image block at the end of a payload, or `null` if there is not one.
+ *
+ * NEVER THROWS. Every failure -- no block, wrong magic, a truncated tail, a size
+ * that does not add up -- returns `null`, because the config in front of the
+ * block is still perfectly good. A link whose image was mangled in transit
+ * should open as the project without the image, not fail to open at all. That is
+ * the opposite of `decodeDocument`'s stance, and deliberately: there, a bad byte
+ * means the thing the user asked for cannot be produced.
+ */
+export function decodeImageBlock(bytes: Uint8Array): SharedImage | null {
+  const start = imageBlockOffset(bytes);
+  if (start === null) return null;
+  if (bytes.length < start + IMAGE_HEADER_BYTES) return null;
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.getUint8(start) !== IMAGE_MAGIC) return null;
+
+  const width = view.getUint16(start + 1, true);
+  const height = view.getUint16(start + 3, true);
+  const scale = view.getFloat32(start + 5, true);
+  if (width <= 0 || height <= 0) return null;
+  // A width and height are two bytes each, so the largest they can claim is
+  // 65535 x 65535 -- four billion pixels. The length check below is what makes
+  // that harmless, and it is checked before anything is allocated.
+  const pixels = width * height;
+  const packed = packedPixelBytes(width, height);
+  const from = start + IMAGE_HEADER_BYTES;
+  if (bytes.length < from + packed) return null;
+
+  // Unpacked to full bytes here, so nothing downstream has to know the wire
+  // format. `* 17` spreads 0..15 across 0..255 exactly -- 15 * 17 is 255 -- where
+  // `<< 4` would cap at 240 and darken every shared image by 6%.
+  const gray = new Uint8Array(pixels);
+  for (let i = 0; i < pixels; i++) {
+    const byte = bytes[from + (i >> 1)] ?? 0;
+    gray[i] = ((i % 2 === 0 ? byte & 0x0f : byte >> 4) * 255) / (SHARE_IMAGE_LEVELS - 1);
+  }
+
+  return { width, height, gray, scale };
+}
+
+/**
+ * Where the block starts: immediately after the notes.
+ *
+ * Re-walks the header and the configs rather than having `decodeDocument` report
+ * the offset, so the two stay independent -- this one must not be able to break
+ * document decoding, which is the thing that actually matters in a link.
+ * Returns `null` for anything it cannot walk.
+ */
+function imageBlockOffset(bytes: Uint8Array): number | null {
+  if (bytes.length < HEADER_BYTES) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const codec = view.getUint8(0);
+  if (codec < 1 || codec > CODEC_VERSION) return null;
+  const configCount = view.getUint16(2, true);
+  const at = HEADER_BYTES + configCount * configBytesFor(scalarCountFor(codec));
+  if (bytes.length < at + 4) return null;
+  const notesLength = view.getUint32(at, true);
+  const afterNotes = at + 4 + notesLength;
+  if (bytes.length <= afterNotes) return null;
+  return afterNotes;
+}

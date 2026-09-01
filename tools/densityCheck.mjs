@@ -470,6 +470,82 @@ if (afterClear === '') {
   fail(`after clearing, status still says "${afterClear}"`);
 }
 
+// --- 7. THE SHARE LINK, ACROSS A REAL RELOAD --------------------------------
+//
+// THE ONE CHECK THAT IS THE POINT, in the sense `configCheck.mjs` means it: a
+// dropped image travels in a share link and comes back after the page has been
+// thrown away and rebuilt. Everything before this passes just as well against an
+// in-memory value.
+//
+// It also covers the part that is easy to get wrong and impossible to see: the
+// link's copy is quantized to 4 bits and stretched on the way out
+// (`toGrayscaleThumbnail`), so this is where "the recipient gets what the sender
+// had" is actually established rather than argued.
+
+// Drop an image, set a distinctive scale, and build the link the Share menu
+// would build. `sharedDensityImage()` is what the panel passes.
+const link = await evaluate(`(async () => {
+  const c = document.createElement('canvas');
+  c.width = 96; c.height = 96;
+  const g = c.getContext('2d');
+  g.fillStyle = '#101010'; g.fillRect(0, 0, 96, 96);
+  g.fillStyle = '#f0f0f0'; g.fillRect(0, 0, 48, 48);
+  const blob = await (await fetch(c.toDataURL('image/png'))).blob();
+  const dt = new DataTransfer();
+  dt.items.add(new File([blob], 'shared_fixture.png', { type: 'image/png' }));
+  const o = { dataTransfer: dt, bubbles: true, cancelable: true };
+  document.dispatchEvent(new DragEvent('dragenter', o));
+  document.dispatchEvent(new DragEvent('dragover', o));
+  document.dispatchEvent(new DragEvent('drop', o));
+  await new Promise((r) => setTimeout(r, 1200));
+
+  window.__fluoddity.dispatch({ kind: 'setDensityScale', value: 3.25 });
+
+  const sl = await import('/src/config/shareLink.ts');
+  return sl.buildShareUrl(
+    { origin: location.origin, pathname: location.pathname, search: '?bus&nopanel&nocalibrate' },
+    window.__fluoddity.projectDocument(),
+    window.__fluoddity.sharedDensityImage(),
+  );
+})()`);
+
+if (typeof link === 'string' && link.includes('#b=')) {
+  pass(`a share link was built carrying the image (${link.length} chars)`);
+} else {
+  die(`expected a #b= share link, got ${String(link).slice(0, 80)}`);
+}
+// The size is a design constraint, not a detail -- a link nobody can paste is
+// not a share feature. Printed rather than asserted here because
+// `shareLink.test.ts` owns the ceiling; this is the real-world number.
+console.log(`link     ${link.length} chars with a 96px image`);
+
+// THE RELOAD. Everything in the page is discarded.
+await send('Page.navigate', { url: link }, sid);
+await sleep(9000);
+
+const restored = await evaluate(`(() => {
+  if (typeof window.__fluoddity !== 'object') return { ready: false };
+  const s = window.__fluoddity.status();
+  return { ready: true, name: s.densityImageName, scale: s.densityScale };
+})()`);
+
+if (!restored.ready) {
+  fail('the page did not come back up after navigating to the share link');
+} else {
+  if (restored.name !== '') {
+    pass(`the image survived a full page reload via the share link (as "${restored.name}")`);
+  } else {
+    fail('after reloading the share link, no density image is loaded');
+  }
+  // 3.25 is exactly representable in float32, so this compares exactly -- a
+  // scale that arrived rounded would mean the lane is the wrong width.
+  if (restored.scale === 3.25) {
+    pass('the image scale round-tripped through the link exactly');
+  } else {
+    fail(`the scale should have come back as 3.25, got ${String(restored.scale)}`);
+  }
+}
+
 const errors = logs.filter((l) => /error|failed|Uncaught/i.test(l));
 if (errors.length > 0) {
   fail(`the page logged errors:\n      ${errors.join('\n      ')}`);

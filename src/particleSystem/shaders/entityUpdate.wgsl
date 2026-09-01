@@ -88,7 +88,7 @@ struct EntityUpdateUniforms {
     canvas_res : vec4f,
     // xy: shove center (world)   z: strength (signed; 0 is off)   w: size
     shove      : vec4f,
-    // xy: density field resolution   zw: reserved
+    // xy: density field resolution   z: density image scale   w: reserved
     //
     // ITS OWN vec4 rather than riding canvas_res.zw beside the strafe field's.
     // The two textures happen to be built at the same dimensions today, and
@@ -215,11 +215,34 @@ fn get_strafe_field(p: vec2f, bc: i32) -> vec2f {
 // The field is built with ZERO in the letterbox margin, so a particle over a
 // part of the world the image does not cover gets no push -- which is what makes
 // "fit, not fill" a usable choice rather than a distortion of the edge texels.
-fn get_density_gradient(p: vec2f, bc: i32) -> vec2f {
+fn density_scale() -> f32 { return u.density.z; }
+
+fn get_density_gradient(p: vec2f) -> vec2f {
     if (!density_active()) { return vec2f(0.0); }
     let res = u.density.xy;
-    return textureSampleLevel(density_texture, density_sampler,
-                              world_to_uv_bc(p, res, bc), 0.0).rg;
+    // Dividing the WORLD position enlarges the image: at scale 2 a given world
+    // point reads the texel half as far from centre, so the picture covers twice
+    // the world. Clamped away from zero because the host's slider cannot reach
+    // it but a hand-written share link can, and a divide by zero here is an
+    // infinity that becomes a NaN position and kills the particle permanently.
+    let uv = world_to_uv(p / max(density_scale(), 1e-3), res);
+
+    // THE IMAGE HAS AN EXTENT, AND THE WORLD DOES NOT STOP AT IT.
+    //
+    // This is why `world_to_uv` is used bare where every other sampler in this
+    // file goes through `world_to_uv_bc`. Those read the canvas and the strafe
+    // field, which ARE the world -- past the edge has to mean something, so
+    // clamping to the edge (or wrapping) is right. A dropped image is a finite
+    // picture placed in the world, and once it is scaled below 1 there is world
+    // outside it. Clamping there would smear the border texels outward into an
+    // infinite streak; repeating (which is what the shared sampler does in
+    // BC_WRAP) would tile the image across the whole plane.
+    //
+    // Neither is what "the image ends here" means, so the field is simply zero
+    // outside it -- the same thing the letterbox margin already is.
+    if (any(uv < vec2f(0.0)) || any(uv > vec2f(1.0))) { return vec2f(0.0); }
+
+    return textureSampleLevel(density_texture, density_sampler, uv, 0.0).rg;
 }
 
 // The Shove tool: a displacement away from (or toward) the cursor while the
@@ -571,8 +594,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     let sense = cfg_density_sense(config);
     if (sense != 0.0) {
         let weight = DENSITY_SENSE_GAIN * sense;
-        ltap += vec4f(get_density_gradient(pos + left_sensor_offset, bc) * weight, 0.0, 0.0);
-        rtap += vec4f(get_density_gradient(pos + right_sensor_offset, bc) * weight, 0.0, 0.0);
+        ltap += vec4f(get_density_gradient(pos + left_sensor_offset) * weight, 0.0, 0.0);
+        rtap += vec4f(get_density_gradient(pos + right_sensor_offset) * weight, 0.0, 0.0);
     }
 
     // The generate-or-mutate branch, and the rule_seed it turns on, live in
@@ -656,7 +679,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     // the clamp inside it is load-bearing here for the same reason it is there:
     // a hand-edited save file reaching pow(10, huge) is an Inf, and an Inf times
     // a zeroed direction is the NaN that kills a particle for good.
-    let density_grad = get_density_gradient(pos, bc);
+    let density_grad = get_density_gradient(pos);
     vel += 0.01 / sqrt_world_size * gravity_expand(cfg_density_force(config)) * density_grad;
 
     // Move: add vel and strafe to pos.
