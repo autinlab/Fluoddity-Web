@@ -51,6 +51,7 @@ import { LEFT_BUTTON } from './ui/inputTracker.ts';
 import { loadPreferences } from './prefs/preferences.ts';
 import { detectMobile, mobileModeFromValue, resolveMobile } from './ui/mobile.ts';
 import { bindTouch } from './ui/touchBinding.ts';
+import { bindImageDrop } from './ui/imageDropBinding.ts';
 import { Panel } from './ui/panel.ts';
 import { fpsFrom, startBand, stepBand } from './perf/fpsBand.ts';
 
@@ -664,6 +665,25 @@ async function start(): Promise<void> {
     // Hands every touch pointer to `touchBinding.ts` below. False on the
     // desktop, where this file handles the pointer exactly as it always has.
     ignoreTouch: mobile,
+  });
+
+  // --- density image drag-and-drop ------------------------------------------
+  //
+  // Installed unconditionally, including under `?nopanel` and on touch. Under
+  // `?nopanel` there is no toast, so a rejected drop reports nothing -- accepted,
+  // because the alternative is worse: NOT binding would let the browser handle
+  // the drop and navigate away from the app, losing the session. Catching the
+  // event silently beats losing the page.
+  //
+  // On touch there is no drag-and-drop gesture at all, so these listeners never
+  // fire. They cost four no-op registrations rather than a branch.
+  bindImageDrop({
+    onImage: (image, name) => {
+      orchestrator.dispatch({ kind: 'loadDensityImage', image, name });
+    },
+    onError: (message) => {
+      orchestrator.reportDropError(message);
+    },
   });
 
   // --- touch ----------------------------------------------------------------

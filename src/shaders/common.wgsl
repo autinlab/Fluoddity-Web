@@ -62,6 +62,19 @@ const PI: f32 = 3.1415926;
 // feel of the whole feature is this one number.
 const STRAFE_FIELD_GAIN: f32 = 0.01;
 
+// How loudly the density gradient speaks into the sensor taps at Density
+// (Sense) == 1. FIXED BY DESIGN, like STRAFE_FIELD_GAIN above: the slider sets
+// the strength, and a second multiplier would only be a way to turn the feature
+// off twice.
+//
+// The unit matters. This is added to the taps BEFORE `sensor_scaling`, so it is
+// in the same units as a raw canvas value -- a deposited velocity -- and it
+// then rides the same `sqrt_world_size * 38.855 * sensor_gain` factor the
+// trails do. That is what keeps one slider position meaning the same thing
+// across world sizes, and it is why the number is this small: canvas values are
+// accumulated particle velocities, which are ~1e-3.
+const DENSITY_SENSE_GAIN: f32 = 0.002;
+
 // ---------------------------------------------------------------------------
 // CANVAS VALUE SCALE -- the canvas is RG16F (see CANVAS_DTYPE in
 // particle_system.py), and fp16's usable range starts at ~6.1e-5. At high
@@ -176,9 +189,19 @@ struct ConfigData {
     misc2: vec4f,  // x: color_sensitivity     y: color_by_cohort(i)
                    // z: sensor_angle_jitter   w: sensor_distance_jitter
     // misc2 had no spares left, so Radial Gravity is rule 2's "add a whole new
-    // vec4" case again rather than a reclaimed lane. Three spares here for the
-    // next additions.
-    misc3: vec4f,  // x: radial_gravity(i)     yzw: reserved
+    // vec4" case again rather than a reclaimed lane.
+    //
+    // ITS THREE SPARES ARE NOW GONE, claimed by the Density Image field --
+    // rule 2's "claim a reserved lane" case, three times, which is why
+    // ConfigData is still 416 bytes after that whole feature landed. THERE ARE
+    // NO SPARE LANES LEFT IN THE STRUCT: the next addition needs a whole new
+    // vec4, exactly as misc2's comment above says of itself.
+    //
+    // Named for being an overflow lane, per the note on misc2 -- read the
+    // per-lane comment, not the name. Radial Gravity and the density channels
+    // share nothing but the vec4 they fit in.
+    misc3: vec4f,  // x: radial_gravity(i)  y: density_force
+                   // z: density_strafe     w: density_sense
 }  // 416 bytes
 
 fn cfg_sensor_gain(c: ConfigData) -> f32     { return c.sensor.x; }
@@ -245,6 +268,30 @@ fn cfg_sensor_distance_jitter(c: ConfigData) -> f32 { return c.misc2.w; }
 // because force2 and misc2 were both full -- read the lane comment, not the
 // name.
 fn cfg_radial_gravity(c: ConfigData) -> bool { return bitcast<i32>(c.misc3.x) != 0; }
+
+// ---------------------------------------------------------------------------
+// The Density Image field -- three channels over one texture.
+//
+// A dropped density image becomes a gradient vector field (see
+// densityField/densityGradient.ts). Vectors point toward INCREASING density, so
+// a POSITIVE control attracts and a NEGATIVE one repels. That is the opposite
+// convention to gravity's, which negates because its direction vector points
+// AWAY from where a positive slider should pull; here the field already points
+// at the target, so there is nothing to flip. The two are commented at their
+// call sites for that reason.
+//
+// The split across three channels mirrors the one the rest of the physics uses:
+// _force feeds velocity (so drag damps it and a rule can resist it), _strafe
+// displaces position (advection -- undampable, irresistible). _sense is the odd
+// one and the interesting one: it adds the gradient to the SENSOR TAPS, so the
+// image arrives as something the particle's rule reads rather than as something
+// done to the particle. Whether that becomes attraction or repulsion is then
+// the RULE's decision, and differs per cohort, because the rule is what maps a
+// sensed gradient to a motion. Hence its 0..1 range: it sets how loudly the
+// image speaks, not which way it pushes.
+fn cfg_density_force(c: ConfigData) -> f32  { return c.misc3.y; }
+fn cfg_density_strafe(c: ConfigData) -> f32 { return c.misc3.z; }
+fn cfg_density_sense(c: ConfigData) -> f32  { return c.misc3.w; }
 
 // The width of the Sensor Distance slider (0..5), which is what a distance
 // jitter of 1.0 spans. It lives here rather than being read from the slider

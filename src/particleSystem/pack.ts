@@ -120,13 +120,18 @@ export function writeConfigRecord(
   f32[base + LANE.misc2 + 2] = config.sensorAngleJitter;
   f32[base + LANE.misc2 + 3] = config.sensorDistanceJitter;
 
-  // misc3: radial_gravity(i), three reserved lanes.
+  // misc3: radial_gravity(i) and the three Density Image channels.
   //
-  // The reserved lanes are NOT written. An ArrayBuffer is zero-initialized by
-  // spec, which reproduces the Python's `np.zeros` exactly -- so misc3.yzw are
-  // already 0.0. (Only true for a fresh buffer: `writeConfigRecord` into a
-  // reused buffer would leave stale bytes there. `packConfigs` always allocates.)
+  // THE STRUCT HAS NO RESERVED LANES LEFT. The note that used to sit here --
+  // that misc3.yzw were deliberately unwritten because an ArrayBuffer is
+  // zero-initialized by spec, reproducing the Python's `np.zeros` -- no longer
+  // applies to them, because all three are written now. It still applies to
+  // `Rule`'s tail when a config carries fewer than ten centers, which is the
+  // only place in this record that still relies on it.
   i32[base + LANE.misc3 + 0] = config.radialGravity ? 1 : 0; // cfg_radial_gravity()
+  f32[base + LANE.misc3 + 1] = config.densityForce;
+  f32[base + LANE.misc3 + 2] = config.densityStrafe;
+  f32[base + LANE.misc3 + 3] = config.densityImageSense;
 }
 
 /**

@@ -169,6 +169,19 @@ export class ParticleSystem {
    */
   private strafeFieldView: GPUTextureView;
   private strafeFieldSize: readonly [number, number] = [1, 1];
+  private densityFieldView: GPUTextureView;
+  private densityFieldSize: readonly [number, number] = [1, 1];
+  /**
+   * Whether a real density image is loaded.
+   *
+   * Two things are being tracked and only one lives here: whether a TEXTURE is
+   * bound (always -- the placeholder counts, because WebGPU validates a bind
+   * group whether or not the shader reads it) and whether it holds an IMAGE.
+   * The shader's `density_active` needs the second, so that is what this is, and
+   * `setDensityField` takes it as an argument rather than inferring it from the
+   * view being non-null.
+   */
+  private densityActive = false;
   /** False while the placeholder is bound; the shader then skips the sample. */
   private strafeFieldBound = false;
 
@@ -327,6 +340,7 @@ export class ParticleSystem {
     });
     this.dummyTextureView = this.dummyTexture.createView();
     this.strafeFieldView = this.dummyTextureView;
+    this.densityFieldView = this.dummyTextureView;
 
     // One uniform slice per sub-step, so the whole frame's uniforms can be
     // written before the encoder opens. Dynamic offsets must be a multiple of
@@ -436,6 +450,11 @@ export class ParticleSystem {
         { binding: 1, visibility: GPUShaderStage.COMPUTE, sampler: {} },
         { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: {} },
         { binding: 3, visibility: GPUShaderStage.COMPUTE, sampler: {} },
+        // The Density Image field. Its own pair rather than sharing the strafe
+        // field's: both are sampled in the same invocation, so they cannot
+        // occupy one slot. `shaders.test.ts` pins all six against the shader.
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, texture: {} },
+        { binding: 5, visibility: GPUShaderStage.COMPUTE, sampler: {} },
       ],
     });
 
@@ -613,6 +632,43 @@ export class ParticleSystem {
   }
 
   /**
+   * Bind the Density Image field, replacing the 1x1 placeholder.
+   *
+   * Same contract as `setStrafeField` and the same reason: this rebuilds the
+   * compute texture groups, so it must not run mid-frame -- a group recorded
+   * earlier in the frame would still point at the old texture. The Orchestrator
+   * pairs a field with a system at construction and replaces both together.
+   *
+   * `active` is separate from "a view was passed" because a DensityField exists
+   * from startup and is empty until an image is dropped. Rebinding is cheap and
+   * happens once; the flag flips per drop, which is why `setDensityActive`
+   * exists beside this and does NOT rebuild anything.
+   */
+  setDensityField(
+    view: GPUTextureView,
+    size: readonly [number, number],
+    active: boolean,
+  ): void {
+    this.densityFieldView = view;
+    this.densityFieldSize = size;
+    this.densityActive = active;
+    this.buildTextureGroups();
+  }
+
+  /**
+   * Turn density sampling on or off without touching a bind group.
+   *
+   * Dropping an image and clearing it both change only the uniform flag -- the
+   * texture and its binding are unchanged. Routing those through
+   * `setDensityField` would rebuild four bind groups per drop for no reason, and
+   * would make a mid-frame drop unsafe when it is in fact the safest possible
+   * change: the flag is read from a uniform written at the top of `advance`.
+   */
+  setDensityActive(active: boolean): void {
+    this.densityActive = active;
+  }
+
+  /**
    * The three bind groups that reference the per-sub-step uniform buffers.
    *
    * Split out of `reload()` because they must ALSO be rebuilt when the physics
@@ -715,6 +771,14 @@ export class ParticleSystem {
               { binding: 1, resource: sampler },
               { binding: 2, resource: this.strafeFieldView },
               { binding: 3, resource: sampler },
+              // The density field takes the SAME sampler as the canvas, for the
+              // reason spelled out above binding 3: one variant of this group is
+              // built per address mode, so the field cannot disagree with the
+              // canvas about the boundary. Invariant 9 wants everything that
+              // crosses an edge to agree, and this is how that is bought rather
+              // than documented.
+              { binding: 4, resource: this.densityFieldView },
+              { binding: 5, resource: sampler },
             ],
           }),
         ),
@@ -1103,6 +1167,11 @@ export class ParticleSystem {
             fc,
             shove,
             this.strafeFieldBound,
+            // Likewise the DENSITY field's own resolution, which differs from
+            // both the canvas's and the strafe field's once its (larger) cap
+            // bites -- see densitySize.ts on why that cap is not the same one.
+            this.densityFieldSize,
+            this.densityActive,
           ),
         ),
         i * this.entityUpdateStride,

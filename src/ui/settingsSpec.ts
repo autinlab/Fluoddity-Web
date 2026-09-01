@@ -519,6 +519,69 @@ export const SETTINGS: readonly Setting[] = [
     revealsOn: 'Gravity',
   }),
 
+  // ================= PROJECT: Density Image =================
+  //
+  // The three channels a dropped density image drives (`densityField/`). All
+  // three are CONFIG, so they save with the project and undo like any other
+  // slider -- but the IMAGE they act on does not, because it is megabytes of
+  // binary belonging to no Project. A config carrying a density strength with no
+  // image dropped is therefore valid and inert, which is the same relationship
+  // Draw Power has to an unpainted strafe field.
+  //
+  // NOT GATED, for that same reason. A gate would have to key on "is an image
+  // loaded", which is live state the registry cannot see, and a gate keyed on
+  // the values themselves would hide the controls exactly when a user has just
+  // dropped an image and is looking for them.
+  setting({
+    field: 'densityImageSense',
+    label: 'Density (Sense)',
+    tier: BASIC,
+    source: CONFIG,
+    kind: SLIDER,
+    lo: 0.0,
+    hi: 1.0,
+    // UNSIGNED, and that is the feature rather than a limitation. This channel
+    // adds the image's gradient to what the SENSORS read, so the particle's own
+    // rule decides whether to climb it or flee it -- and because each cohort's
+    // rule is a different mutation, different cohorts do different things with
+    // the same image. Attraction and repulsion are emergent here; the two
+    // sliders below are where you ask for one explicitly.
+    help:
+      'How strongly a dropped density image feeds into the particle sensors. ' +
+      'The behaviour rule then decides what to do about it, so cohorts may be ' +
+      'attracted to dense regions and others repelled - the image becomes part ' +
+      'of what the particles perceive rather than a force applied to them.',
+    group: 'Density Image',
+  }),
+  setting({
+    field: 'densityStrafe',
+    label: 'Density (Strafe)',
+    tier: BASIC,
+    source: CONFIG,
+    kind: SLIDER,
+    lo: -1.0,
+    hi: 1.0,
+    help:
+      'Displaces particles along the density gradient each step. Positive ' +
+      'pulls them toward dense regions, negative pushes them away. This is a ' +
+      'direct displacement, so no behaviour rule can resist it.',
+    group: 'Density Image',
+  }),
+  setting({
+    field: 'densityForce',
+    label: 'Density (Force)',
+    tier: ADVANCED,
+    source: CONFIG,
+    kind: SLIDER,
+    lo: -1.0,
+    hi: 1.0,
+    help:
+      'Accelerates particles along the density gradient. Positive attracts ' +
+      'toward dense regions, negative repels. Unlike Density (Strafe) this ' +
+      'feeds velocity, so drag damps it and the behaviour rule can push back.',
+    group: 'Density Image',
+  }),
+
   // ================= PROJECT: Trails =================
   setting({
     field: 'trailPersistence',

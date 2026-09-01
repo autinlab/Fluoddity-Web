@@ -88,7 +88,17 @@ struct EntityUpdateUniforms {
     canvas_res : vec4f,
     // xy: shove center (world)   z: strength (signed; 0 is off)   w: size
     shove      : vec4f,
-    // x: frame_count(i)   y: strafe_field_active(i)   zw: reserved
+    // xy: density field resolution   zw: reserved
+    //
+    // ITS OWN vec4 rather than riding canvas_res.zw beside the strafe field's.
+    // The two textures happen to be built at the same dimensions today, and
+    // sharing the lane would make that a silent REQUIREMENT -- a later change to
+    // either one's sizing rule would then skew the other's world->uv mapping,
+    // which is not an error but a stretched field (see fieldSize.ts on reading
+    // the cap as min(w,512)).
+    density    : vec4f,
+    // x: frame_count(i)   y: strafe_field_active(i)   z: density_active(i)
+    // w: reserved
     flags      : vec4f,
 }
 @group(0) @binding(2) var<uniform> u : EntityUpdateUniforms;
@@ -102,9 +112,17 @@ struct EntityUpdateUniforms {
 // whether the shader reads them, unlike GL).
 @group(1) @binding(2) var strafe_field_texture : texture_2d<f32>;
 @group(1) @binding(3) var strafe_field_sampler : sampler;
+// The Density Image field (see densityField/). A gradient vector field built on
+// the host from a dropped image; unlike the strafe field nothing on the GPU ever
+// writes it, so it is upload-only and needs no render attachment. Inactive until
+// an image is dropped -- the sample is skipped rather than reading the 1x1
+// placeholder, which WebGPU requires be bound whether or not the shader reads it.
+@group(1) @binding(4) var density_texture : texture_2d<f32>;
+@group(1) @binding(5) var density_sampler : sampler;
 
 fn frame_count() -> i32 { return bitcast<i32>(u.flags.x); }
 fn strafe_field_active() -> bool { return bitcast<i32>(u.flags.y) != 0; }
+fn density_active() -> bool { return bitcast<i32>(u.flags.z) != 0; }
 fn canvas_res() -> vec2f { return u.canvas_res.xy; }
 
 //=========================================================================================
@@ -185,6 +203,22 @@ fn get_strafe_field(p: vec2f, bc: i32) -> vec2f {
     if (!strafe_field_active()) { return vec2f(0.0); }
     let res = u.canvas_res.zw;
     return textureSampleLevel(strafe_field_texture, strafe_field_sampler,
+                              world_to_uv_bc(p, res, bc), 0.0).rg;
+}
+
+// Read the density gradient at a world position.
+//
+// Boundary-aware for the same reason get_can and get_strafe_field are: past the
+// edge has to mean something, and it should mean the same thing it means for
+// every other texture read (invariant 9's "four things must agree").
+//
+// The field is built with ZERO in the letterbox margin, so a particle over a
+// part of the world the image does not cover gets no push -- which is what makes
+// "fit, not fill" a usable choice rather than a distortion of the edge texels.
+fn get_density_gradient(p: vec2f, bc: i32) -> vec2f {
+    if (!density_active()) { return vec2f(0.0); }
+    let res = u.density.xy;
+    return textureSampleLevel(density_texture, density_sampler,
                               world_to_uv_bc(p, res, bc), 0.0).rg;
 }
 
@@ -516,6 +550,31 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     var ltap = get_can(pos + left_sensor_offset, bc);
     var rtap = get_can(pos + right_sensor_offset, bc);
 
+    // DENSITY (SENSE) -- the image, added to what the particle can feel.
+    //
+    // This is the channel that makes the image something the RULE responds to
+    // rather than something applied to the particle over the rule's head. Each
+    // sensor is sampled at its OWN position, so a density gradient arrives as an
+    // L/R asymmetry -- which is precisely the signal `black_box` and the
+    // `y_reflect` mirror term are built around. The population then negotiates
+    // with the image the same way it negotiates with its own trails, and
+    // whether a given cohort climbs the gradient or flees it is decided by its
+    // mutated rule, not here. That is why this control has no sign.
+    //
+    // ADDED BEFORE `sensor_scaling` DELIBERATELY. Riding that factor puts the
+    // injection in the same magnitude regime as the trail values the rule is
+    // already tuned for, instead of requiring DENSITY_SENSE_GAIN to be
+    // hand-matched to it -- and it keeps the feel constant across world sizes,
+    // which is the whole job of that scaling. The consequence is deliberate too:
+    // Sensor Gain 0 blinds a particle to the image as well as to the trails,
+    // which is what "the sensors are off" ought to mean.
+    let sense = cfg_density_sense(config);
+    if (sense != 0.0) {
+        let weight = DENSITY_SENSE_GAIN * sense;
+        ltap += vec4f(get_density_gradient(pos + left_sensor_offset, bc) * weight, 0.0, 0.0);
+        rtap += vec4f(get_density_gradient(pos + right_sensor_offset, bc) * weight, 0.0, 0.0);
+    }
+
     // The generate-or-mutate branch, and the rule_seed it turns on, live in
     // rule.wgsl -- ONE copy, shared with entityPick.wgsl, so the rule a clicked
     // particle adopts is derived by exactly the code that decides what it obeys
@@ -576,10 +635,39 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 
     vel += 0.01 / sqrt_world_size * -gravity_expand(cfg_gravity_force(config)) * gravity_dir;
 
+    // DENSITY (FORCE) and DENSITY (STRAFE) -- the two direct channels.
+    //
+    // Sampled ONCE here, before anything moves the particle, and used by both.
+    // Same argument gravity_dir makes immediately above: the two channels must
+    // not be able to disagree about which way the density rises, and taking the
+    // direction once is what guarantees it rather than documents it.
+    //
+    // NOT NEGATED, where both gravity terms are. gravity_dir points AWAY from
+    // where a positive slider should pull, so gravity flips it; the density
+    // gradient already points at high density, which is where a positive
+    // slider is labelled to attract. A negation copied across from the line
+    // above would invert every one of these controls, and the label would be
+    // the only thing that said so.
+    //
+    // `gravity_expand` is REUSED rather than reimplemented. It is not gravity
+    // math -- it is the expansion of a -1..1 knob onto four logarithmic decades
+    // with a dead zone at centre, which is exactly the control shape these two
+    // sliders have. A second copy is what invariant 9 exists to prevent, and
+    // the clamp inside it is load-bearing here for the same reason it is there:
+    // a hand-edited save file reaching pow(10, huge) is an Inf, and an Inf times
+    // a zeroed direction is the NaN that kills a particle for good.
+    let density_grad = get_density_gradient(pos, bc);
+    vel += 0.01 / sqrt_world_size * gravity_expand(cfg_density_force(config)) * density_grad;
+
     // Move: add vel and strafe to pos.
     pos += vel;
     pos += strafe * cfg_strafe_power(config);
     pos += 0.01 / sqrt_world_size * -gravity_expand(cfg_gravity_strafe(config)) * gravity_dir;
+    // The strafe half of the density field, from the sample taken above. A
+    // displacement, so drag cannot damp it and no rule can resist it -- the
+    // channel to reach for when the image should WIN rather than be negotiated
+    // with.
+    pos += 0.01 / sqrt_world_size * gravity_expand(cfg_density_strafe(config)) * density_grad;
 
     // The painted Strafe Field, in the strafe channel: a displacement, not a
     // force, so no rule can resist it and drag never damps it. Applied before

@@ -47,6 +47,10 @@ import type { SavedConfig } from '../config/persistence.ts';
 import type { PickResult } from '../particleSystem/pick.ts';
 import type { Setting } from '../ui/settingsSpec.ts';
 import type { Preferences } from '../prefs/preferences.ts';
+// The plain-bytes image type, shared with the share-image composer rather than
+// redeclared. It is a DOM-free value (width, height, RGBA bytes), which is what
+// makes it usable on this boundary at all.
+import type { RgbaImage } from '../share/qrRender.ts';
 
 /**
  * What the mouse does on the canvas. The active TOOL.
@@ -366,6 +370,25 @@ export type Command =
       readonly value: number | boolean;
     }
   | { readonly kind: 'clearStrafeField' }
+  // --- the Density Image field ----------------------------------------------
+  //
+  // The IMAGE arrives as a command; the three STRENGTH channels do not -- they
+  // are `Setting`s in the registry and travel through `editSetting` like every
+  // other config field. That split is invariant 10: the strengths are simulation
+  // truth and belong to the project, the image is live-only state the
+  // Orchestrator brokers (see `densityField.ts` on why it is not saved).
+  //
+  // `RgbaImage`, not a `File` or an `ImageBitmap`: those are DOM types, and the
+  // command boundary is the line where DOM stops. `ui/imageDrop.ts` decodes,
+  // this carries plain bytes, and `densityGradient` -- which is pure -- does the
+  // arithmetic. The same layering `PickResult` and `InputState` already set.
+  | {
+      readonly kind: 'loadDensityImage';
+      readonly image: RgbaImage;
+      /** For the status line, so the panel can say WHICH image is loaded. */
+      readonly name: string;
+    }
+  | { readonly kind: 'clearDensityImage' }
   // --- view mode ------------------------------------------------------------
   // Its own command rather than a case of `editDrawPref`: see `ViewPrefField`.
   // Never recorded in history -- these say how you are LOOKING at the project,
@@ -658,6 +681,17 @@ export interface Status {
    * `saveError`, which it already reads every frame.
    */
   readonly configBusy: string;
+
+  /**
+   * The loaded density image's name, or `''` when none is loaded.
+   *
+   * Doubles as the "is there one?" flag rather than carrying a separate boolean
+   * beside it: two fields that can never disagree are worse than one, and the
+   * panel needs the name anyway to say what it is showing. `Status` has no
+   * optional members (see this interface's header), so absence is the empty
+   * string, not `undefined`.
+   */
+  readonly densityImageName: string;
 
   /**
    * The three settings sources, as plain records the panel reads by field name.

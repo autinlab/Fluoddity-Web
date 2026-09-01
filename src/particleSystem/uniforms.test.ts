@@ -54,7 +54,7 @@ test('WorldData occupies offset 0 of every struct, byte for byte', () => {
   assert.equal(expected.length / 2, WORLD_DATA_SIZE);
 
   const buffers = [
-    packEntityUpdateUniforms(WORLD, [1024, 1024], [512, 512], 7, null, false),
+    packEntityUpdateUniforms(WORLD, [1024, 1024], [512, 512], 7, null, false, [1, 1], false),
     packCanvasUniforms(WORLD, 7),
     packBrushUniforms(WORLD, [1024, 1024], 7),
   ];
@@ -88,15 +88,42 @@ test('frame 0 is representable, because it is the reset sentinel', () => {
 
 test('the entity-update canvas_res lane carries both resolutions', () => {
   const f32 = new Float32Array(
-    packEntityUpdateUniforms(WORLD, [1024, 768], [512, 256], 3, null, false),
+    packEntityUpdateUniforms(WORLD, [1024, 768], [512, 256], 3, null, false, [256, 128], false),
   );
   const base = WORLD_DATA_SIZE / 4;
   assert.deepEqual([...f32.slice(base, base + 4)], [1024, 768, 512, 256]);
 });
 
+test('the density lane carries the density field\'s own resolution', () => {
+  // A SEPARATE vec4 from canvas_res, and this is what pins that. Sharing
+  // canvas_res.zw with the strafe field would make the two fields' sizes one
+  // value; here they are deliberately different in the call above, so a shared
+  // lane could not satisfy both.
+  const f32 = new Float32Array(
+    packEntityUpdateUniforms(WORLD, [1024, 768], [512, 256], 3, null, false, [256, 128], false),
+  );
+  const base = WORLD_DATA_SIZE / 4 + 8;
+  assert.deepEqual([...f32.slice(base, base + 2)], [256, 128]);
+});
+
+test('densityActive is its own int lane beside strafeFieldActive', () => {
+  const base = WORLD_DATA_SIZE / 4 + 12;
+  const off = new Int32Array(
+    packEntityUpdateUniforms(WORLD, [1, 1], [1, 1], 0, null, false, [8, 8], false),
+  );
+  const on = new Int32Array(
+    packEntityUpdateUniforms(WORLD, [1, 1], [1, 1], 0, null, false, [8, 8], true),
+  );
+  // flags.z. The two flags must be independent: a shared lane would make
+  // painting the strafe field switch the density image on.
+  assert.equal(off[base + 2], 0);
+  assert.equal(on[base + 2], 1);
+  assert.equal(on[base + 1], 0, 'density must not disturb the strafe flag');
+});
+
 test('a null shove writes zeroes, not stale values', () => {
   const f32 = new Float32Array(
-    packEntityUpdateUniforms(WORLD, [1024, 1024], [1, 1], 5, null, false),
+    packEntityUpdateUniforms(WORLD, [1024, 1024], [1, 1], 5, null, false, [1, 1], false),
   );
   const base = WORLD_DATA_SIZE / 4 + 4;
   assert.deepEqual([...f32.slice(base, base + 4)], [0, 0, 0, 0]);
@@ -105,7 +132,7 @@ test('a null shove writes zeroes, not stale values', () => {
 test('a live shove writes centre, strength and size', () => {
   const shove = { center: [0.25, -0.5] as const, strength: -0.004, size: 0.1 };
   const f32 = new Float32Array(
-    packEntityUpdateUniforms(WORLD, [1024, 1024], [1, 1], 5, shove, true),
+    packEntityUpdateUniforms(WORLD, [1024, 1024], [1, 1], 5, shove, true, [1, 1], false),
   );
   const base = WORLD_DATA_SIZE / 4 + 4;
   // 0.25 and -0.5 are exact in binary, so these compare exactly.
@@ -119,12 +146,15 @@ test('a live shove writes centre, strength and size', () => {
 });
 
 test('strafeFieldActive is an int lane, and false really is 0', () => {
-  const base = WORLD_DATA_SIZE / 4 + 8;
+  // +12, not +8: the `density` vec4 sits between `shove` and `flags`. Getting
+  // this wrong reads the density RESOLUTION as a boolean, which is truthy for
+  // any real texture -- the strafe field would then look permanently active.
+  const base = WORLD_DATA_SIZE / 4 + 12;
   const off = new Int32Array(
-    packEntityUpdateUniforms(WORLD, [1, 1], [1, 1], 0, null, false),
+    packEntityUpdateUniforms(WORLD, [1, 1], [1, 1], 0, null, false, [1, 1], false),
   );
   const on = new Int32Array(
-    packEntityUpdateUniforms(WORLD, [1, 1], [1, 1], 0, null, true),
+    packEntityUpdateUniforms(WORLD, [1, 1], [1, 1], 0, null, true, [1, 1], false),
   );
   assert.equal(off[base + 1], 0);
   assert.equal(on[base + 1], 1);

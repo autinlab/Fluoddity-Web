@@ -127,6 +127,11 @@ test('the registry has the same 35 entries the desktop does, plus the web-only o
     // No desktop equivalent: the desktop has one layout and no touch input, so
     // there is nothing for it to choose between.
     'mobileMode',
+    // No desktop equivalent: the Density Image field is web-only, because it
+    // depends on dropping a file onto the page.
+    'densityImageSense',
+    'densityStrafe',
+    'densityForce',
   ];
   const ported = SETTINGS.filter((s) => !WEB_ONLY.includes(s.field));
   assert.equal(ported.length, 35);
@@ -319,9 +324,14 @@ test('grouped preserves declaration order and omits empty groups', () => {
   // 'Behavior' is LAST because its one member is declared last, which is how
   // "Reset on Behavior Change" ends up at the bottom of the Preferences panel.
   // That placement is the reason it is a group of its own, so it is pinned here.
+  // 'Density Image' sits after 'Forces' because that is what it is -- two of its
+  // three channels are the same force/strafe pair gravity uses, reading a
+  // texture instead of a constant direction. Declaring it before 'Trails' keeps
+  // every motion control together rather than splitting them around the trail
+  // settings.
   assert.deepEqual(
     advanced.map(([name]) => name),
-    ['Population', 'Sensors', 'Forces', 'Trails', 'Appearance',
+    ['Population', 'Sensors', 'Forces', 'Density Image', 'Trails', 'Appearance',
      'Advanced', 'Simulation', 'Display', 'Behavior'],
   );
   // 'Trails' holds one ADVANCED entry, so Basic must not render it.

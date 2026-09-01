@@ -89,7 +89,27 @@
  * document round-trips through here intact and is rejected by `fromDocument`,
  * which is the layering `shareLink.test.ts` asserts.
  */
-export const CODEC_VERSION = 1;
+export const CODEC_VERSION = 2;
+
+/**
+ * Scalars carried by a version-1 payload.
+ *
+ * V1 IS A STRICT PREFIX OF V2. The Density Image field appended three scalars to
+ * `SCALARS`; every offset before them is unchanged, so a v1 payload is a v2
+ * payload with the tail missing, and the tail's absence means zero -- which is
+ * exactly what "no image bias" is, and the same argument `persistence.ts` makes
+ * for a save file with no `misc3` keys.
+ *
+ * SO THE DECODER READS BOTH, which is a deliberate departure from how this
+ * project treats the v7 document format. That refusal ("v7 is absent by
+ * construction") is right because v7 fields MEAN something different and
+ * migration is one-way and offline. A share link is neither: it is a URL already
+ * posted somewhere nobody controls, with no migration path and no owner to
+ * re-issue it. Rejecting v1 would break every link ever shared to buy nothing --
+ * there is no ambiguity to resolve, because the missing bytes have exactly one
+ * possible reading.
+ */
+const SCALARS_V1_COUNT = 16;
 
 /** Thrown for bytes this decoder will not accept. */
 export class ShareCodecError extends Error {
@@ -130,6 +150,12 @@ const SCALARS: readonly (readonly [string, string])[] = [
   ['misc2', 'color_sensitivity'],
   ['misc2', 'sensor_angle_jitter'],
   ['misc2', 'sensor_distance_jitter'],
+  // APPENDED, never inserted. The three above this line are at the offsets
+  // every v1 link was written against, so adding here costs those links
+  // nothing -- see SCALARS_V1_COUNT.
+  ['misc3', 'density_force'],
+  ['misc3', 'density_strafe'],
+  ['misc3', 'density_sense'],
 ] as const;
 
 /**
@@ -195,12 +221,23 @@ function flagOf(raw: Record<string, unknown>, key: string): boolean {
  * a stale constant behind -- the allocation and the writer would disagree by
  * exactly the amount that makes the last config overrun.
  */
-const CONFIG_BYTES =
-  RULE_FLOAT_COUNT * 4 + // rule, float32 -- see the header
-  SCALARS.length * 8 + //  scalars, float64 -- see the header
-  4 + //                   cohorts, uint32 (up to 300000 in the shipped configs)
-  1 + //                   initial_conditions
-  1; //                    the flag byte
+function configBytesFor(scalarCount: number): number {
+  return (
+    RULE_FLOAT_COUNT * 4 + // rule, float32 -- see the header
+    scalarCount * 8 + //     scalars, float64 -- see the header
+    4 + //                   cohorts, uint32 (up to 300000 in the shipped configs)
+    1 + //                   initial_conditions
+    1 //                     the flag byte
+  );
+}
+
+/** Bytes per config in the version this build WRITES. */
+const CONFIG_BYTES = configBytesFor(SCALARS.length);
+
+/** How many scalars a payload of a given codec version carries. */
+function scalarCountFor(codec: number): number {
+  return codec === 1 ? SCALARS_V1_COUNT : SCALARS.length;
+}
 
 /** version + document version + config count + the three world values. */
 const HEADER_BYTES = 1 + 1 + 2 + 8 + 8 + 1;
@@ -324,14 +361,20 @@ export function decodeDocument(bytes: Uint8Array): unknown {
 
   const codec = view.getUint8(at);
   at += 1;
-  if (codec !== CODEC_VERSION) {
+  if (codec < 1 || codec > CODEC_VERSION) {
     // A LINK FROM A FUTURE BUILD, and the message says so rather than calling it
     // damaged -- the user's remedy is to update, not to ask for a fresh copy.
+    // Codec 0 lands here too, which is right: there was never a version 0, so
+    // those bytes are not a link at all.
     throw new ShareCodecError(
       `this link uses share format ${codec}, which this version cannot read ` +
-        `(it reads ${CODEC_VERSION}) -- the page may need updating`,
+        `(it reads up to ${CODEC_VERSION}) -- the page may need updating`,
     );
   }
+  // Every offset after the header depends on this, so it is resolved once here
+  // rather than tested per config.
+  const scalarCount = scalarCountFor(codec);
+  const configBytes = configBytesFor(scalarCount);
 
   const version = view.getUint8(at);
   at += 1;
@@ -348,7 +391,7 @@ export function decodeDocument(bytes: Uint8Array): unknown {
   // real failure (`shareLink.ts` trap 2), and a `DataView` past its end throws a
   // `RangeError`, not something a caller can tell from a bug. Checked up front so
   // the error names truncation, which is what actually happened.
-  const needed = HEADER_BYTES + configCount * CONFIG_BYTES + 4;
+  const needed = HEADER_BYTES + configCount * configBytes + 4;
   if (bytes.length < needed) {
     throw new ShareCodecError(
       `the payload claims ${configCount} configs but is ${bytes.length} bytes, ` +
@@ -364,11 +407,14 @@ export function decodeDocument(bytes: Uint8Array): unknown {
       at += 4;
     }
 
+    // Padded to the CURRENT scalar count so every index below is in range for a
+    // v1 payload too. The pad is 0, which is what a missing density lane means.
     const values: number[] = [];
-    for (let i = 0; i < SCALARS.length; i += 1) {
+    for (let i = 0; i < scalarCount; i += 1) {
       values.push(view.getFloat64(at, true));
       at += 8;
     }
+    while (values.length < SCALARS.length) values.push(0);
 
     const cohorts = view.getUint32(at, true);
     at += 4;
@@ -412,7 +458,12 @@ export function decodeDocument(bytes: Uint8Array): unknown {
         sensor_angle_jitter: values[14]!,
         sensor_distance_jitter: values[15]!,
       },
-      misc3: { radial_gravity: (flags & 4) !== 0 },
+      misc3: {
+        radial_gravity: (flags & 4) !== 0,
+        density_force: values[16]!,
+        density_strafe: values[17]!,
+        density_sense: values[18]!,
+      },
     });
   }
 

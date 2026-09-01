@@ -118,6 +118,71 @@ test('EntityBuffer and ConfigBuffer keep their project-wide binding numbers', ()
   );
 });
 
+test('the entity-update texture group keeps its four texture/sampler slots', () => {
+  // These four are what `computeTextureLayout` in particleSystem.ts declares,
+  // and a shader naming a different number than the host binds is a pipeline
+  // creation failure -- which on this path means a black canvas and no error
+  // worth reading, because nothing in `npm test` compiles WGSL at all.
+  //
+  // The density field's pair is 4/5 rather than reusing the strafe field's:
+  // both are sampled in the same invocation, so they cannot share a slot.
+  const entityUpdate = stripComments(expand('entityUpdate.wgsl'));
+  const expected: readonly [number, string][] = [
+    [0, 'canvas_texture'],
+    [1, 'canvas_sampler'],
+    [2, 'strafe_field_texture'],
+    [3, 'strafe_field_sampler'],
+    [4, 'density_texture'],
+    [5, 'density_sampler'],
+  ];
+  for (const [binding, name] of expected) {
+    assert.match(
+      entityUpdate,
+      new RegExp(`@group\\(1\\)\\s*@binding\\(${binding}\\)\\s*var\\s+${name}\\b`),
+      `entityUpdate.wgsl must bind ${name} at group 1 binding ${binding}`,
+    );
+  }
+});
+
+test('the density sense term is added BEFORE the sensor rescale', () => {
+  // ORDER IS THE FEATURE. Riding `sensor_scaling` is what puts the injected
+  // gradient in the same magnitude regime as the trail values the Fourier rule
+  // is tuned for, and what makes one slider position mean the same thing at
+  // every world size. Moving the injection after the rescale does not error --
+  // it makes the control's useful range depend on World Size and Sensor Gain,
+  // which reads as "this slider does nothing here and too much there".
+  const entityUpdate = stripComments(expand('entityUpdate.wgsl'));
+  const inject = entityUpdate.indexOf('DENSITY_SENSE_GAIN');
+  const rescale = entityUpdate.indexOf('let sensor_scaling');
+  assert.ok(inject > 0, 'the sense injection must exist');
+  assert.ok(rescale > 0, 'the sensor rescale must exist');
+  assert.ok(
+    inject < rescale,
+    'the density sense term must be added to the taps before sensor_scaling multiplies them',
+  );
+});
+
+test('the density force and strafe channels are NOT negated, unlike gravity', () => {
+  // The gradient points at high density, which is where a positive slider is
+  // labelled to attract; gravity_dir points away from where its positive slider
+  // pulls, so gravity negates. Copying that negation across would silently
+  // invert all three density controls and leave the label as the only thing
+  // claiming otherwise -- and an inverted density field is entirely plausible
+  // to look at, which is what makes it worth a test rather than a comment.
+  const entityUpdate = stripComments(expand('entityUpdate.wgsl'));
+  for (const channel of ['cfg_density_force', 'cfg_density_strafe']) {
+    assert.match(
+      entityUpdate,
+      new RegExp(`\\*\\s*gravity_expand\\(${channel}\\(config\\)\\)`),
+      `${channel} must be applied through gravity_expand with no leading minus`,
+    );
+    assert.ok(
+      !new RegExp(`-\\s*gravity_expand\\(${channel}\\(config\\)\\)`).test(entityUpdate),
+      `${channel} must NOT be negated -- that would invert attract and repel`,
+    );
+  }
+});
+
 test('the compute workgroup size matches the host dispatch arithmetic', () => {
   // These live in different files. `workgroupsFor` divides by WORKGROUP_SIZE,
   // so if the shader's @workgroup_size shrinks, the host under-dispatches and

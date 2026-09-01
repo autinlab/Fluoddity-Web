@@ -87,6 +87,9 @@ import {
   isFullFrame,
 } from '../recorder/recordingSettings.ts';
 import { StrafeField } from '../strafeField/strafeField.ts';
+import { DensityField } from '../densityField/densityField.ts';
+import { densityGradient } from '../densityField/densityGradient.ts';
+import type { RgbaImage } from '../share/qrRender.ts';
 import { screenToWorld, worldToUv } from '../particleSystem/coords.ts';
 import {
   type PickResult,
@@ -214,6 +217,26 @@ export class Orchestrator implements CommandBus {
    * `rebuildSystem` replaces the two together and destroys the two together.
    */
   private strafeField: StrafeField;
+
+  /**
+   * The Density Image field, and the image it was derived from.
+   *
+   * BOTH are held, and the source image is the reason. The field's texture is
+   * canvas-sized, so `rebuildSystem` must replace it along with everything else
+   * a World Size change resizes -- and a user's dropped image quietly
+   * disappearing at that moment would be a bug, not a reset. Keeping the source
+   * `RgbaImage` means the rebuild re-derives the gradient at the new size
+   * instead, which is the only way to survive it: the texture cannot be
+   * resampled into a different aspect without the original.
+   *
+   * `densityImage` is `null` exactly when no image is loaded, and
+   * `densityImageName` follows it. The FIELD, meanwhile, always exists -- it is
+   * bound from startup and merely inactive, because WebGPU validates a bind
+   * group whether or not the shader reads it.
+   */
+  private densityField: DensityField;
+  private densityImage: RgbaImage | null = null;
+  private densityImageName = '';
 
   /**
    * Where the cursor was on the previous frame of the stroke in progress, in
@@ -482,6 +505,7 @@ export class Orchestrator implements CommandBus {
     assembler: Assembler;
     system: ParticleSystem;
     strafeField: StrafeField;
+    densityField: DensityField;
     prefs: Preferences;
     project: Project;
     store: ConfigStore;
@@ -497,6 +521,7 @@ export class Orchestrator implements CommandBus {
     this.assembler = opts.assembler;
     this.system = opts.system;
     this.strafeField = opts.strafeField;
+    this.densityField = opts.densityField;
     this.prefs = opts.prefs;
     this.project = opts.project;
     this.store = opts.store;
@@ -592,6 +617,14 @@ export class Orchestrator implements CommandBus {
     strafeField.setWrap(loaded.world.boundaryConditions === BC.WRAP);
     system.setStrafeField(strafeField.view(), strafeField.size);
 
+    // Bound before the system goes live for the same reason the strafe field is:
+    // `setDensityField` rebuilds the compute texture groups, and that is only
+    // safe while nothing has been recorded against them. It starts INACTIVE --
+    // there is no image yet, and the placeholder exists only because WebGPU
+    // requires every declared binding to be filled.
+    const densityField = new DensityField(opts.device, system.canvasSize);
+    system.setDensityField(densityField.view(), densityField.size, false);
+
     const targets = new RenderTargets(opts.device);
     const camera = await Camera.create(opts.device, new CameraState(), targets);
     const assembler = await Assembler.create(opts.device, targets, opts.surface.format);
@@ -615,6 +648,7 @@ export class Orchestrator implements CommandBus {
       assembler,
       system,
       strafeField,
+      densityField,
       prefs,
       project,
       store,
@@ -1672,6 +1706,20 @@ export class Orchestrator implements CommandBus {
     this.pendingNotice = message;
   }
 
+  /**
+   * Report a failed image drop on the toast.
+   *
+   * PUBLIC, unlike `notify`, and this is the only such route. A drop is user
+   * input that arrives outside the command boundary -- the file may not decode,
+   * which is discovered asynchronously, long after any command could have
+   * carried the failure. Modelling it as a command would mean a
+   * `showError`-shaped member of `Command` that any caller could use for
+   * anything, which is a worse boundary than one narrowly-named method.
+   */
+  reportDropError(message: string): void {
+    this.notify(message);
+  }
+
   /** Take the pending notice and clear it. The destructive half of `notify`. */
   private takeNotice(): string {
     const notice = this.pendingNotice;
@@ -2392,6 +2440,30 @@ export class Orchestrator implements CommandBus {
         this.adoptPreferences(DEFAULT_PREFERENCES);
         return;
 
+      case 'loadDensityImage':
+        this.applyDensityImage(command.image, command.name);
+        // Announced because the image alone may change NOTHING on screen: all
+        // three strength channels default to 0, so a first drop with the sliders
+        // untouched is invisible. Without this the feature would look broken at
+        // exactly the moment a user first tries it.
+        this.notify(
+          `Loaded ${command.name} - set a Density Image slider to bias the particles`,
+        );
+        return;
+
+      case 'clearDensityImage':
+        // NOT in the undo timeline, for exactly the reasons `clearStrafeField`
+        // below is not: the image is live-only state that no restart preserves,
+        // and History is a timeline of Projects. The three STRENGTH channels are
+        // project state and do undo -- so after this, an undo still walks back
+        // through the slider edits, which is the right split.
+        this.densityImage = null;
+        this.densityImageName = '';
+        this.densityField.clear();
+        this.system.setDensityActive(false);
+        this.notify('Density image cleared');
+        return;
+
       case 'clearStrafeField':
         // THE ONLY RESET the field has, and deliberately NOT in the undo
         // timeline: it is live-only state that never survives a restart either,
@@ -2753,12 +2825,37 @@ export class Orchestrator implements CommandBus {
     );
     replacementField.setWrap(this.project.world.boundaryConditions === BC.WRAP);
     replacement.setStrafeField(replacementField.view(), replacementField.size);
+
+    // THE DENSITY FIELD IS RE-DERIVED, NOT CARRIED OVER. Its texture is
+    // canvas-sized, so it has to be replaced like everything else here -- and
+    // because the gradient is letterboxed into the canvas's aspect, a new canvas
+    // shape needs a new gradient, not a copy of the old texture. This is the
+    // whole reason the Orchestrator holds the source image.
+    //
+    // The strafe field, by contrast, is simply lost: it is a painting whose
+    // source is the gesture that made it, and there is nothing to re-derive
+    // from. That asymmetry is not an inconsistency -- it is the difference
+    // between state with a source and state that IS the source.
+    const replacementDensity = new DensityField(this.device, replacement.canvasSize);
+    if (this.densityImage !== null) {
+      replacementDensity.upload(
+        densityGradient(this.densityImage, replacementDensity.size),
+      );
+    }
+    replacement.setDensityField(
+      replacementDensity.view(),
+      replacementDensity.size,
+      replacementDensity.active,
+    );
+
     replacement.applyProject(this.project.configs, this.project.world);
 
     const outgoingSystem = this.system;
     const outgoingField = this.strafeField;
+    const outgoingDensity = this.densityField;
     this.system = replacement;
     this.strafeField = replacementField;
+    this.densityField = replacementDensity;
     this.assembler.setStrafeField(replacementField.view());
 
     // End the stroke in progress: `strokePrevUv` holds a uv in the OLD field's
@@ -2778,6 +2875,26 @@ export class Orchestrator implements CommandBus {
     // Destroyed last, so nothing above can throw between the swap and the free.
     outgoingSystem.destroy();
     outgoingField.destroy();
+    outgoingDensity.destroy();
+  }
+
+  /**
+   * Derive the gradient field from a dropped image and bind it.
+   *
+   * The gradient is built for THIS field's size, which is why the size comes
+   * from the field rather than from the canvas: the density cap is larger than
+   * the strafe field's and differs from the canvas's, and `upload` throws on a
+   * mismatch rather than letting `writeTexture` complain about byte counts.
+   *
+   * No bind group is rebuilt -- the texture and its binding do not change, only
+   * its contents and the uniform flag. That is what makes dropping an image safe
+   * at any point in a frame.
+   */
+  private applyDensityImage(image: RgbaImage, name: string): void {
+    this.densityImage = image;
+    this.densityImageName = name;
+    this.densityField.upload(densityGradient(image, this.densityField.size));
+    this.system.setDensityActive(true);
   }
 
   // =========================================================================
@@ -2870,6 +2987,7 @@ export class Orchestrator implements CommandBus {
 
       saveError: this.saveError,
       configBusy: this.configBusy,
+      densityImageName: this.densityImageName,
 
       // Read from `prefs` directly, NOT from `settingsSources()` -- which is
       // empty while the panel is closed. See the `Status` field comments.

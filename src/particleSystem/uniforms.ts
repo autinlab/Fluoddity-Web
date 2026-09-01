@@ -42,12 +42,21 @@ import { WORLD_DATA_SIZE } from './layout.ts';
 import { PICK_UNIFORM_SIZE } from './pick.ts';
 
 /**
- * `EntityUpdateUniforms` -- 80 bytes.
+ * `EntityUpdateUniforms` -- 96 bytes.
  *
  *   world      : WorldData  (32)  offset 0
  *   canvas_res : vec4f      (16)  offset 32   xy: canvas   zw: strafe field
  *   shove      : vec4f      (16)  offset 48   xy: center   z: strength  w: size
- *   flags      : vec4f      (16)  offset 64   x: frame_count(i)  y: strafe_active(i)
+ *   density    : vec4f      (16)  offset 64   xy: density field   zw: reserved
+ *   flags      : vec4f      (16)  offset 80   x: frame_count(i)
+ *                                            y: strafe_active(i)
+ *                                            z: density_active(i)
+ *
+ * The density field takes its OWN vec4 rather than the two spare lanes in
+ * `canvas_res`. Both fields are built at the same dimensions today, and sharing
+ * would quietly promote that coincidence to a requirement -- after which a
+ * change to either sizing rule would skew the other's world->uv mapping, which
+ * is a stretched field rather than an error.
  *
  * `canvas_res` is THE `textureDimensions` HOIST. The GLSL calls
  * `textureSize(canvas_texture, 0)` at five sites per invocation
@@ -55,7 +64,7 @@ import { PICK_UNIFORM_SIZE } from './pick.ts';
  * via reset/fence, and `:384`); at 600k entities x 30 sub-steps that is not
  * free, and the value is constant for the whole pass anyway.
  */
-export const ENTITY_UPDATE_UNIFORM_SIZE = 80;
+export const ENTITY_UPDATE_UNIFORM_SIZE = 96;
 
 /** `CanvasUniforms` -- 48 bytes. world (32) + flags (16). */
 export const CANVAS_UNIFORM_SIZE = 48;
@@ -113,6 +122,8 @@ export function packEntityUpdateUniforms(
   frameCount: number,
   shove: ShoveState | null,
   strafeFieldActive: boolean,
+  densityFieldRes: readonly [number, number],
+  densityActive: boolean,
 ): ArrayBuffer {
   const { buffer, f32, i32 } = withWorld(world, ENTITY_UPDATE_UNIFORM_SIZE);
 
@@ -128,9 +139,15 @@ export function packEntityUpdateUniforms(
   f32[AFTER_WORLD + 6] = shove === null ? 0.0 : shove.strength;
   f32[AFTER_WORLD + 7] = shove === null ? 0.0 : shove.size;
 
-  // flags: x frame_count(i), y strafe_field_active(i), zw reserved
-  i32[AFTER_WORLD + 8] = frameCount;
-  i32[AFTER_WORLD + 9] = strafeFieldActive ? 1 : 0;
+  // density: xy resolution, zw reserved
+  f32[AFTER_WORLD + 8] = densityFieldRes[0];
+  f32[AFTER_WORLD + 9] = densityFieldRes[1];
+
+  // flags: x frame_count(i), y strafe_field_active(i), z density_active(i),
+  //        w reserved
+  i32[AFTER_WORLD + 12] = frameCount;
+  i32[AFTER_WORLD + 13] = strafeFieldActive ? 1 : 0;
+  i32[AFTER_WORLD + 14] = densityActive ? 1 : 0;
 
   return buffer;
 }

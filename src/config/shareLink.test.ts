@@ -37,7 +37,7 @@ import * as LZStringNS from 'lz-string';
 
 import { BC, IC } from '../particleSystem/config.ts';
 import { ConfigFormatError, fromDocument, toDocument } from './persistence.ts';
-import { CODEC_VERSION, encodeDocument } from './shareCodec.ts';
+import { CODEC_VERSION, decodeDocument, encodeDocument } from './shareCodec.ts';
 import {
   SHARE_LINK_WARN_LENGTH,
   ShareLinkError,
@@ -112,11 +112,86 @@ function oneConfig(step: number): Record<string, unknown> {
       sensor_angle_jitter: 0.0,
       sensor_distance_jitter: 0.16,
     },
-    misc3: { radial_gravity: false },
+    misc3: {
+      radial_gravity: false,
+      // The Density Image channels. Present here because `toDocument` writes
+      // them and the codec is a NORMALIZING round trip -- the same reason a
+      // legacy `appearance` block does not come back out. A fixture that
+      // omitted them would be asserting that the codec drops them.
+      density_force: 0.0,
+      density_strafe: 0.0,
+      density_sense: 0.0,
+    },
   };
 }
 
 const LOC = { origin: 'https://example.github.io', pathname: '/Fluoddity2/', search: '' };
+
+/**
+ * A version-1 payload, made by surgery on a version-2 one.
+ *
+ * Built rather than checked in as bytes so it cannot rot: it is derived from
+ * whatever this build encodes, with exactly the change that made v2 -- the codec
+ * byte set back to 1 and the three appended density scalars cut out. If some
+ * other part of the layout ever moves, this stops being a valid v1 payload and
+ * the test fails, which is the correct outcome; a hardcoded blob would keep
+ * passing while claiming to test something that no longer exists.
+ *
+ * Assumes ONE config, which the caller guarantees.
+ */
+function downgradeToV1(v2: Uint8Array): Uint8Array {
+  const HEADER = 1 + 1 + 2 + 8 + 8 + 1;
+  const RULE = 80 * 4;
+  const V1_SCALARS = 16;
+  // The density scalars sit immediately after the 16 a v1 writer would have
+  // stopped at.
+  const cutAt = HEADER + RULE + V1_SCALARS * 8;
+  const cutLength = 3 * 8;
+  const out = new Uint8Array(v2.length - cutLength);
+  out.set(v2.subarray(0, cutAt), 0);
+  out.set(v2.subarray(cutAt + cutLength), cutAt);
+  out[0] = 1;
+  return out;
+}
+
+test('a version-1 link still decodes, with the density channels reading zero', () => {
+  // THE POINT: a share link is a URL already posted somewhere nobody controls.
+  // Appending three scalars must not invalidate every link ever shared, and the
+  // missing bytes have exactly one possible reading -- no image bias.
+  const doc = validDocument();
+  const v1 = downgradeToV1(encodeDocument(doc));
+  const decoded = decodeDocument(v1) as {
+    configs: { misc3: Record<string, unknown> }[];
+  };
+
+  const misc3 = decoded.configs[0]!.misc3;
+  assert.equal(misc3['density_force'], 0);
+  assert.equal(misc3['density_strafe'], 0);
+  assert.equal(misc3['density_sense'], 0);
+  // And the lane that shares the vec4 with them is untouched -- a wrong offset
+  // would corrupt this rather than the density values.
+  assert.equal(misc3['radial_gravity'], false);
+});
+
+test('a version-1 link decodes every field before the appended ones unchanged', () => {
+  // The stronger statement: v1 is a strict PREFIX of v2, so everything but the
+  // density keys must come back identical. An off-by-one in the scalar count
+  // would shift `cohorts` and the flag byte and show up here.
+  const doc = validDocument();
+  const fromV2 = decodeDocument(encodeDocument(doc)) as Record<string, unknown>;
+  const fromV1 = decodeDocument(downgradeToV1(encodeDocument(doc))) as Record<string, unknown>;
+  assert.deepEqual(fromV1, fromV2);
+});
+
+test('a codec version this build does not know is refused', () => {
+  const bytes = encodeDocument(validDocument());
+  bytes[0] = 99;
+  assert.throws(() => decodeDocument(bytes), /share format 99/);
+  // Zero was never a version, so it is not a link at all rather than an old one.
+  bytes[0] = 0;
+  assert.throws(() => decodeDocument(bytes), /share format 0/);
+});
+
 
 /**
  * A link in the OLD format -- JSON through lz-string under the `#c=` key.

@@ -240,6 +240,15 @@ function configFromDocument(raw: Record<string, unknown>, where: string): Simula
       // the fixed screen axis, which is what `false` means -- so those configs
       // keep falling exactly the way they did.
       radialGravity: boolOr(misc3, 'radial_gravity', false, where),
+      // The Density Image channels, additive in exactly the sense `force2` was:
+      // a file written before the field existed has no such keys, and 0 -- no
+      // image bias at all -- is what that file meant. The image itself is never
+      // in a save (it is live-only, like the Strafe Field), so a config that
+      // sets these and a session with nothing dropped is a valid, inert
+      // combination rather than a broken one.
+      densityForce: numOr(misc3, 'density_force', 0.0, where),
+      densityStrafe: numOr(misc3, 'density_strafe', 0.0, where),
+      densityImageSense: numOr(misc3, 'density_sense', 0.0, where),
       rule: rule as readonly number[],
     },
   );
@@ -349,6 +358,13 @@ function configToDocument(config: SimulationConfig): unknown {
     },
     misc3: {
       radial_gravity: config.radialGravity,
+      // Named for the GLSL lane, like every other key here, so a save file can
+      // be read side by side with `common.wgsl`. `density_sense` rather than
+      // `density_image_sense`: the lane accessor is `cfg_density_sense`, and the
+      // file follows the shader, not the TypeScript field name.
+      density_force: config.densityForce,
+      density_strafe: config.densityStrafe,
+      density_sense: config.densityImageSense,
     },
   };
 }

@@ -163,6 +163,29 @@ export interface SimulationConfig {
    * pull towards or away from the origin.
    */
   readonly radialGravity: boolean;
+  /**
+   * The Density Image field -- how a dropped density image biases this config's
+   * particles. Three channels over one texture (`densityField/`), split the same
+   * way gravity is and for the same reason.
+   *
+   * `densityForce` and `densityStrafe` are signed -1..1, expanded
+   * logarithmically in the shader: POSITIVE attracts toward high density,
+   * NEGATIVE repels. Force feeds velocity, so drag damps it and a rule can push
+   * back; Strafe displaces position, so nothing can.
+   *
+   * `densityImageSense` is 0..1 and has no sign on purpose. It adds the gradient
+   * to the SENSOR taps, so the image becomes something the rule reads rather
+   * than something done to the particle -- and whether a given cohort is
+   * attracted or repelled is then decided by its own mutated rule. The control
+   * sets how loudly the image speaks, not which way it pushes.
+   *
+   * None of the three does anything until an image is dropped. The image itself
+   * is NOT part of a config: it is live-only, like the Strafe Field, for the
+   * same reason (see `densityField.ts`).
+   */
+  readonly densityForce: number;
+  readonly densityStrafe: number;
+  readonly densityImageSense: number;
   /** 80 floats -> 10 FourierCenters, each frequency(4) + amplitude(4). */
   readonly rule: readonly number[];
 }
@@ -201,6 +224,10 @@ export type SimulationConfigRequired = Pick<
  *   sensorDistanceJitter         existed are unchanged."
  *   radialGravity               "False is what every config saved before this
  *                                existed meant."
+ *   densityForce/densityStrafe/ Default 0: no image bias, which is what every
+ *   densityImageSense           config written before the Density Image field
+ *                               existed meant. They are additive to the save
+ *                               format in exactly the sense `force2` was.
  *
  * Exported as ONE object, not scattered through a function signature, so the
  * config reader can spread it (`{ ...SIMULATION_CONFIG_DEFAULTS, ...parsed }`)
@@ -217,6 +244,9 @@ export const SIMULATION_CONFIG_DEFAULTS = {
   sensorAngleJitter: 0.0,
   sensorDistanceJitter: 0.0,
   radialGravity: false,
+  densityForce: 0.0,
+  densityStrafe: 0.0,
+  densityImageSense: 0.0,
   rule: [] as readonly number[],
 } as const satisfies Omit<SimulationConfig, keyof SimulationConfigRequired>;
 

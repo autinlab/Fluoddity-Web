@@ -321,6 +321,18 @@ function parityConfig(): SimulationConfig {
     sensorAngleJitter: r.sensorAngleJitter,
     sensorDistanceJitter: r.sensorDistanceJitter,
     radialGravity: r.radialGravity,
+    // The Density Image channels did not exist when the reference produced this
+    // fixture, and 0 is what its absence meant -- the same reading
+    // `persistence.ts` gives a save file with no such keys.
+    //
+    // This also leaves the BYTE-EXACT hex assertion below intact rather than
+    // needing it rewritten: misc3.yzw were zero-filled by the ArrayBuffer spec
+    // before these lanes were claimed, and writing 0.0 into them produces the
+    // identical bytes. A non-zero default here would have silently invalidated
+    // the strongest single assertion in this file.
+    densityForce: 0.0,
+    densityStrafe: 0.0,
+    densityImageSense: 0.0,
     rule: r.rule,
   };
 }
