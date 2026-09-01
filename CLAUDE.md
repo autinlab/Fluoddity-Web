@@ -52,7 +52,13 @@ node tools/fieldCheck.mjs --keep-shots ../field  # strafe field + its Y flip
 node tools/configCheck.mjs                       # manifest + IndexedDB, across a reload
 node tools/uiCheck.mjs                           # gated latch, reveal toggle
 node tools/saveTransferCheck.mjs                 # save round trip through real IndexedDB
+node tools/densityCheck.mjs                      # density image field + its Y flip
 ```
+
+Most of these hardcode a **Windows** Chrome path and read `CHROME_PATH` as an
+override, so on macOS:
+`CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"`.
+`densityCheck.mjs` defaults per platform and needs no override.
 
 Other tools: `tools/linkToConfig.mjs` (share link → `.json` preset),
 `tools/qrSurvival.mjs` + `tools/qrDecodeImage.mjs` (does the QR stamp survive a
@@ -145,7 +151,9 @@ Verified against the code as of this writing:
 
 - **The default preset is `Tangle`** (`configStore.ts:86`, `DEFAULT_PRESET_NAME`),
   not `Starcrossedv8`. The README's `?preset=` examples name deleted files.
-- **The Layout table predates five modules**: `src/recorder/` (lazily-loaded MP4
+- **The Layout table predates six modules**: `src/densityField/` (a dropped
+  density image as a gradient field that biases the particles — see README "The
+  Density Image field, and the fourth Y flip"), `src/recorder/` (lazily-loaded MP4
   export via mediabunny), `src/share/` (screenshot with the project QR-stamped
   into it — the image *is* the project), `src/calibration/` (first-run GPU ladder
   behind the splash), `src/perf/` (auto-calibrate physics rate against the open

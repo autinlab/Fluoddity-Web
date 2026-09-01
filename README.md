@@ -886,6 +886,150 @@ Passes 1 and 3 do vote, and separate by two orders of magnitude (+117 vs +0.06
 on the overlay) because they measure a painted overlay rather than an emergent
 simulation.
 
+## The Density Image field, and the fourth Y flip
+
+Drop an image on the page and it becomes a gradient vector field the particles
+read. `src/densityField/` owns it: one `rg16float` texture at capped canvas
+resolution, built on the host from the dropped pixels, sampled per particle per
+physics step.
+
+Three `ConfigData` channels consume it, split the way gravity already splits —
+and the third is the point of the feature:
+
+| Control | Range | Channel |
+|---|---|---|
+| Density (Force) | −1..1 | velocity — drag damps it, a rule can push back |
+| Density (Strafe) | −1..1 | position — advection, nothing resists it |
+| Density (Sense) | 0..1 | the **sensor taps** |
+
+**Sense has no sign, and that is the design rather than a gap.** It adds the
+gradient to what the sensors read, so the image arrives as something the Fourier
+rule *perceives* rather than as a force applied over the rule's head — and
+because each cohort's rule is a different mutation, cohorts disagree about what
+to do with it. Some collapse onto the image's edges, some ignore them, some flee.
+Attraction and repulsion are emergent there; the two signed sliders are where you
+ask for one explicitly.
+
+The two sensors are sampled at **their own positions**, so a gradient arrives as
+an L/R asymmetry — which is exactly the signal `black_box` and the `y_reflect`
+mirror term are built around. This engine is already an edge-follower; this makes
+it follow *your* edges.
+
+All three claim `misc3`'s last three spare lanes, so `ConfigData` is still 416
+bytes and `layout.fixture.json` did not change. **The struct now has no spare
+lanes at all**; the next addition needs a whole new vec4.
+
+### THE FLIP, AND WHY IT IS THE FOURTH OF ITS KIND
+
+`world_to_uv` is `p / (2*extent) + 0.5`, so world **+y maps to increasing uv.y**,
+which is increasing texel row. An image's row 0 is its **top**. So the world's
+bottom edge is texel row 0, and an image uploaded in its natural row order
+arrives upside down. Two things follow and both are applied in
+`densityGradient.ts`: rows are emitted flipped, and the vertical gradient is
+negated.
+
+Same hazard as the strafe field's, and worse in one respect: there is no overlay
+at all for this texture, so nothing on screen disagrees with a mirrored field. It
+is simply a plausible field pushing the wrong way. `densityGradient.test.ts`
+therefore uses an **asymmetric fixture** — bright in one corner only — because a
+symmetric one passes just as well flipped, which makes it worse than no test.
+
+### Smooth, then differentiate
+
+The intended input is scientific density data, and cryo-ET is dominated by shot
+noise at the pixel scale. The gradient operator amplifies precisely that: raw
+tomogram data differentiates into a field whose magnitude is noise and whose
+direction is random per texel, which drives particles into a jitter that reads as
+a broken simulation.
+
+So the chain is luminance → area-average resample → percentile contrast stretch →
+Gaussian blur → Sobel → peak normalize. Four of those six are load-bearing for a
+reason worth knowing:
+
+- **The blur is not optional.** Measured on a disc buried in comparable noise,
+  smoothing raises the edge-to-background gradient ratio from 1.6 to 7.1.
+- **Sigma is in FIELD texels, not image pixels**, measured after the resample —
+  so the same image smooths the same amount whether it arrives at 256px or
+  4000px.
+- **The resample is area-averaging, not bilinear.** An 8× downscale reads four
+  source pixels and ignores sixty under bilinear, which aliases the noise
+  straight through into the gradient.
+- **The stretch is percentile-based.** A dropped figure carries white margins and
+  black lettering that a min/max normalization would spend the whole range on,
+  leaving the actual density flat.
+
+### The rest of it, briefly
+
+- **`rg16float`, so there is an f32→f16 converter.** Base WebGPU cannot *filter*
+  `rg32float` without an optional feature, and this texture is linearly sampled —
+  the same trade `common.wgsl` records for the canvas. `Float16Array`,
+  `Math.f16round` and `DataView.setFloat16` are ES2025 and absent from the Node
+  version CI pins, so `halfFloat.ts` writes the conversion out. Its test uses an
+  independently-written decoder, for the reason `parity.fixture.json` is not
+  regenerated from the TypeScript.
+- **`rgba8unorm` was the other easy option and is worse.** 8 bits over a
+  normalized [−1,1] is 1/128, and the field is scaled so its *peak* is 1 — so a
+  typical texel sits well below that, and quantizing there terraces exactly the
+  low-contrast structure a tomogram carries.
+- **The cap is 1024², larger than the strafe field's 512².** Not a copy that
+  drifted: `fieldSize.ts` justifies its cap by saying the strafe field "holds
+  soft blobby pushes, not structure", and a density image *is* structure.
+- **Fit, not fill.** The image keeps its own aspect inside a canvas-aspect
+  texture, margin left at zero, so a round virion stays round and particles
+  outside the image feel nothing. `letterboxScale` is composed, not
+  reimplemented — this feature adds **no new coordinate math** (invariant 9).
+- **The sense term is added BEFORE `sensor_scaling`.** Riding that factor puts it
+  in the same magnitude regime as the trail values the rule is tuned for, and
+  keeps one slider position meaning the same thing at every world size. The
+  consequence is deliberate: Sensor Gain 0 blinds a particle to the image too.
+- **Not negated, where both gravity terms are.** `gravity_dir` points away from
+  where a positive slider pulls; the gradient already points at high density.
+  Copying the minus across would invert all three controls with only the label to
+  say otherwise, so `shaders.test.ts` asserts its absence.
+- **The image is not saved; the three strengths are.** Same decision as the
+  strafe field. A config with a density strength and nothing dropped is a valid
+  inert combination, which is what Draw Power is to an unpainted field.
+- **The Orchestrator keeps the source `RgbaImage`.** `rebuildSystem` replaces
+  every canvas-sized texture, and a dropped image vanishing on a World Size
+  change would be a bug — so the gradient is *re-derived* at the new size. The
+  strafe field is simply lost there, and the asymmetry is the difference between
+  state with a source and state that *is* the source.
+- **Drop listeners go on the DOCUMENT, not the canvas.** A drop that misses the
+  canvas is still a drop the user meant, and an uncancelled one makes the browser
+  navigate to the image file — losing the simulation, the project and the undo
+  history. This is the one place `ui/`'s "the canvas owns canvas input" rule does
+  not apply, and the failure it prevents is a lost page rather than a misrouted
+  event.
+- **Share links: the codec is v2, and v1 still decodes.** Three appended scalars
+  changed the per-config byte count. A posted URL has no migration path and no
+  owner to re-issue it, and the missing bytes have exactly one reading — so
+  unlike the v7 *document* format, this legacy arm earns its place.
+
+### Verifying it
+
+`node tools/densityCheck.mjs --keep-shots DIR` (with `npm run dev` running).
+Three voting checks and one advisory, on a fixture bright in its own top-left
+quadrant — asymmetric on both axes, so a y-flip, an x-mirror and a transpose are
+each visible and each distinguishable.
+
+The voting ones are that attraction fills the **upper**-left quadrant (measured:
++2.8 there against +0.5 for the best other quadrant), that the lower-left does
+*not* gain more (which is what a missing row flip looks like), and that a negative
+strength empties what a positive one fills.
+
+**The sense channel is advisory and does not vote**, for the reason
+`fieldCheck.mjs` gives for its pass 2. Its design is that the rule decides, and
+each cohort's rule differs — so there is no direction to assert, and asserting one
+would be asserting the feature does *not* work. A scalar "something changed" is no
+better: the simulation is chaotic and moves more than that between two runs of
+identical code. The evidence is the screenshot, and saying so beats dressing a
+coin flip up as a threshold.
+
+Drag-and-drop itself is **not covered** and cannot be: CDP cannot synthesize a
+file drop with a real `DataTransfer`. The decidable half is unit-tested
+(`imageDrop.test.ts` — which file to take from a multi-file drop, MIME versus
+extension, the rejection messages); the gesture is a manual check.
+
 ## Config storage: a manifest and IndexedDB
 
 `persistence.discover()` globs `configs/` and iterates its subfolders. **No
