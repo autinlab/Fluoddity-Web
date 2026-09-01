@@ -76,6 +76,14 @@ export function buildProjectSection(
   // themselves (`advancedToggle.ts`).
   addAdvancedToggle(folder, 'advancedProject', ctx);
 
+  /**
+   * Per-frame work the group folders added beyond their controls.
+   *
+   * Only the Density Image folder has any, and it is a readout rather than a
+   * binding -- `bindingsOnly` would have nothing to do with it.
+   */
+  const extras: ((s: Status) => void)[] = [];
+
   for (const [group, settings] of grouped(ctx.advanced, [CONFIG, WORLD])) {
     // `group` is never empty for these entries -- every CONFIG/WORLD setting
     // declares one -- but the fallback keeps a future ungrouped entry from
@@ -84,6 +92,9 @@ export function buildProjectSection(
     (sub.element as HTMLElement).dataset['group'] = group;
     for (const setting of settings) {
       bindings.push(addControl(sub, setting, status, ctx));
+    }
+    if (group === DENSITY_GROUP) {
+      extras.push(addDensityImageRow(sub, status, ctx));
     }
   }
 
@@ -104,6 +115,76 @@ export function buildProjectSection(
         folder.title = title;
       }
       base.refresh(s, input);
+      for (const extra of extras) extra(s);
     },
+  };
+}
+
+/**
+ * The `group` the density controls declare. Matched rather than hardcoded twice.
+ */
+const DENSITY_GROUP = 'Density Image';
+
+/** What the readout says with nothing dropped. */
+const NO_IMAGE = '(drop an image)';
+
+/**
+ * The Density Image folder's two non-slider rows: which image is loaded, and a
+ * way to remove it.
+ *
+ * ## WHY THE READOUT EXISTS
+ *
+ * The three sliders do nothing at all until an image is dropped, and there is
+ * otherwise NOTHING on screen that says whether one is. A user who drops a file
+ * the browser cannot decode gets a toast that has since faded, then three
+ * controls that appear broken. This row is the answer to "is it loaded?", which
+ * is the first question the feature raises.
+ *
+ * ## WHY CLEAR IS HERE AND NOT ONLY A HOTKEY
+ *
+ * Dropping is the only way in, and without this there was no way OUT -- the image
+ * would persist for the session with no affordance to remove it. Labelled "not
+ * undoable" for the same reason `Clear Field` is: the image is live-only state
+ * that History was never designed to hold.
+ *
+ * Returns a per-frame updater rather than a `SectionHandle`: this owns no
+ * `ControlBinding`, because a readonly monitor is not a control the tier system
+ * or the gating system has anything to say about.
+ */
+function addDensityImageRow(
+  folder: FolderApi,
+  status: Status,
+  ctx: SectionContext,
+): (s: Status) => void {
+  const proxy = { image: status.densityImageName || NO_IMAGE };
+  const readout = folder.addBinding(proxy, 'image', {
+    readonly: true,
+    label: 'Loaded',
+  });
+
+  const clear = folder.addButton({ title: 'Clear Image (not undoable)' });
+  clear.on('click', () => {
+    ctx.send({ kind: 'clearDensityImage' });
+  });
+  ctx.tooltip.attach(clear.element as HTMLElement, {
+    title: 'Clear Image',
+    body:
+      'Forget the dropped density image. The three strength sliders keep their ' +
+      'values and are saved with the project; the image itself never is.',
+  });
+
+  // WRITTEN ON AN ACTUAL CHANGE, not every frame -- `refresh()` touches the DOM,
+  // and this runs at 60fps for a string that changes when a file is dropped.
+  // Same instinct as the folder title above.
+  let shown = proxy.image;
+  return (s) => {
+    const next = s.densityImageName || NO_IMAGE;
+    if (next === shown) return;
+    shown = next;
+    proxy.image = next;
+    // No `isRefreshing` guard needed here and deliberately none added: a
+    // readonly monitor dispatches nothing, so there is no feedback loop for one
+    // to break. Adding a guard anyway would suggest there is.
+    readout.refresh();
   };
 }

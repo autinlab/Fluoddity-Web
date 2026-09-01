@@ -131,7 +131,7 @@ export function writeConfigRecord(
   i32[base + LANE.misc3 + 0] = config.radialGravity ? 1 : 0; // cfg_radial_gravity()
   f32[base + LANE.misc3 + 1] = config.densityForce;
   f32[base + LANE.misc3 + 2] = config.densityStrafe;
-  f32[base + LANE.misc3 + 3] = config.densityImageSense;
+  f32[base + LANE.misc3 + 3] = config.densitySense;
 }
 
 /**

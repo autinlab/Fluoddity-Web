@@ -1025,10 +1025,22 @@ better: the simulation is chaotic and moves more than that between two runs of
 identical code. The evidence is the screenshot, and saying so beats dressing a
 coin flip up as a threshold.
 
-Drag-and-drop itself is **not covered** and cannot be: CDP cannot synthesize a
-file drop with a real `DataTransfer`. The decidable half is unit-tested
-(`imageDrop.test.ts` — which file to take from a multi-file drop, MIME versus
-extension, the rejection messages); the gesture is a manual check.
+**The drop gesture is covered too**, and by the production listeners rather than
+by dispatching the command behind them. `DataTransfer` is constructible in
+Chrome, so a synthetic `DragEvent` can carry a real `File` — the technique
+Playwright and Puppeteer use. That reaches `carriesFiles`, the type filter, the
+real `createImageBitmap` decode and the dispatch: the overlay appears on
+`dragover` and hides after the drop, a `.txt` is refused *without* discarding the
+image already loaded, and a 2600px fixture exercises the `MAX_DECODE_DIM`
+downscale branch. Everything decidable is also unit-tested in
+`imageDrop.test.ts` — which file to take from a multi-file drop, MIME versus
+extension, the rejection messages.
+
+**One thing genuinely cannot be automated:** that `preventDefault` on `dragover`
+stops the browser navigating away to the dropped file. Synthetic events do not
+navigate, so there is nothing for the assertion to catch. That is the single most
+load-bearing line in `imageDropBinding.ts` — getting it wrong loses the
+simulation, the project and the undo history — and it is checked by hand.
 
 ## Config storage: a manifest and IndexedDB
 

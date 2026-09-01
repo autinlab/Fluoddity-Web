@@ -129,7 +129,7 @@ test('the registry has the same 35 entries the desktop does, plus the web-only o
     'mobileMode',
     // No desktop equivalent: the Density Image field is web-only, because it
     // depends on dropping a file onto the page.
-    'densityImageSense',
+    'densitySense',
     'densityStrafe',
     'densityForce',
   ];

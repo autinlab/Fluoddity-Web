@@ -248,7 +248,7 @@ function configFromDocument(raw: Record<string, unknown>, where: string): Simula
       // combination rather than a broken one.
       densityForce: numOr(misc3, 'density_force', 0.0, where),
       densityStrafe: numOr(misc3, 'density_strafe', 0.0, where),
-      densityImageSense: numOr(misc3, 'density_sense', 0.0, where),
+      densitySense: numOr(misc3, 'density_sense', 0.0, where),
       rule: rule as readonly number[],
     },
   );
@@ -359,12 +359,13 @@ function configToDocument(config: SimulationConfig): unknown {
     misc3: {
       radial_gravity: config.radialGravity,
       // Named for the GLSL lane, like every other key here, so a save file can
-      // be read side by side with `common.wgsl`. `density_sense` rather than
-      // `density_image_sense`: the lane accessor is `cfg_density_sense`, and the
-      // file follows the shader, not the TypeScript field name.
+      // be read side by side with `common.wgsl`. All three match their accessors
+      // (`cfg_density_force` and friends) with only the snake/camel change, so
+      // there is no third spelling to keep in step -- which is the situation the
+      // `misc2`/`appearance` rename exists as a warning about.
       density_force: config.densityForce,
       density_strafe: config.densityStrafe,
-      density_sense: config.densityImageSense,
+      density_sense: config.densitySense,
     },
   };
 }

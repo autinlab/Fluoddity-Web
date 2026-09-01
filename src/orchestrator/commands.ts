@@ -687,9 +687,14 @@ export interface Status {
    *
    * Doubles as the "is there one?" flag rather than carrying a separate boolean
    * beside it: two fields that can never disagree are worse than one, and the
-   * panel needs the name anyway to say what it is showing. `Status` has no
-   * optional members (see this interface's header), so absence is the empty
-   * string, not `undefined`.
+   * reader needs the name anyway. `Status` has no optional members (see this
+   * interface's header), so absence is the empty string, not `undefined`.
+   *
+   * READ BY `projectSection.ts`'s Density Image folder, which renders it beside
+   * a Clear Image button. That row is the only thing on screen that says whether
+   * an image is loaded, and the three strength sliders do nothing without one --
+   * so a user whose drop was refused would otherwise be looking at three
+   * controls that appear broken.
    */
   readonly densityImageName: string;
 

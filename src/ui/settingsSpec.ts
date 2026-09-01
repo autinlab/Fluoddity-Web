@@ -533,7 +533,7 @@ export const SETTINGS: readonly Setting[] = [
   // the values themselves would hide the controls exactly when a user has just
   // dropped an image and is looking for them.
   setting({
-    field: 'densityImageSense',
+    field: 'densitySense',
     label: 'Density (Sense)',
     tier: BASIC,
     source: CONFIG,

@@ -339,7 +339,7 @@ await setField('densityStrafe', 0.0);
 await clearImage();
 await reset();
 await sleep(2000);
-await loadFixtureAndSet('densityImageSense', 0.8);
+await loadFixtureAndSet('densitySense', 0.8);
 await sleep(4000);
 const sensed = await quadrantLuma(await shot('4-sense'));
 console.log(
@@ -348,7 +348,7 @@ console.log(
 );
 
 // --- 5. clearing really clears ---------------------------------------------
-await setField('densityImageSense', 0.0);
+await setField('densitySense', 0.0);
 await clearImage();
 await reset();
 await sleep(2500);
@@ -359,6 +359,115 @@ if (spread <= controlSpread * 2 + 1) {
   pass(`clearing the image restores an unbiased distribution (spread ${spread.toFixed(2)} vs control ${controlSpread.toFixed(2)})`);
 } else {
   fail(`after clearing, the distribution is still skewed (spread ${spread.toFixed(2)} vs control ${controlSpread.toFixed(2)})`);
+}
+
+// --- 6. THE DROP GESTURE ITSELF ---------------------------------------------
+//
+// Everything above reaches the field by DISPATCHING `loadDensityImage`, which
+// skips the entire user-facing entry point: the overlay, the drag depth counter,
+// the file-type filter and the real `createImageBitmap` decode. That is most of
+// the feature's code and all of the part a user actually touches.
+//
+// `DataTransfer` is constructible in Chrome, so a synthetic drop can carry a
+// real `File` -- the same technique Playwright and Puppeteer use. That reaches
+// `carriesFiles` (via `dataTransfer.types`), `chooseDroppedImage`, `decodeImage`
+// and the dispatch, all through the production listeners.
+//
+// THE ONE THING THIS CANNOT ASSERT is that `preventDefault` stops the browser
+// navigating away to the dropped file, because synthetic events do not navigate
+// in the first place. That line is the most load-bearing one in
+// `imageDropBinding.ts` and it is checked by hand, not here.
+
+/** Fire a full drag sequence carrying one synthetic file. */
+const dropFile = async ({ name, type, dataUrl, width }) => {
+  return evaluate(`(async () => {
+    const src = ${dataUrl === null ? `(() => {
+      // A canvas larger than MAX_DECODE_DIM, so the resize branch runs.
+      const c = document.createElement('canvas');
+      c.width = ${width}; c.height = ${width};
+      const g = c.getContext('2d');
+      g.fillStyle = '#000'; g.fillRect(0, 0, c.width, c.height);
+      g.fillStyle = '#fff'; g.fillRect(0, 0, c.width / 2, c.height / 2);
+      return c.toDataURL('image/png');
+    })()` : JSON.stringify(dataUrl)};
+    const blob = ${type.startsWith('image/')
+      ? `await (await fetch(src)).blob()`
+      : `new Blob(['not an image'], { type: ${JSON.stringify(type)} })`};
+    const file = new File([blob], ${JSON.stringify(name)}, { type: ${JSON.stringify(type)} });
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    const opts = { dataTransfer: dt, bubbles: true, cancelable: true };
+
+    document.dispatchEvent(new DragEvent('dragenter', opts));
+    document.dispatchEvent(new DragEvent('dragover', opts));
+    const overlay = document.getElementById('image-drop-overlay');
+    const duringDrag = overlay === null ? 'missing' : getComputedStyle(overlay).display;
+
+    document.dispatchEvent(new DragEvent('drop', opts));
+    // The decode is async and the handler does not await it.
+    await new Promise((r) => setTimeout(r, 1200));
+    const afterDrop = overlay === null ? 'missing' : getComputedStyle(overlay).display;
+
+    return { duringDrag, afterDrop, loaded: window.__fluoddity.status().densityImageName };
+  })()`);
+};
+
+// Reset to a known state: nothing loaded, no strength.
+await setField('densitySense', 0.0);
+await clearImage();
+await sleep(500);
+
+// A small real PNG, built in-page.
+const tinyPng = await evaluate(`(() => {
+  const c = document.createElement('canvas');
+  c.width = 64; c.height = 64;
+  const g = c.getContext('2d');
+  g.fillStyle = '#000'; g.fillRect(0, 0, 64, 64);
+  g.fillStyle = '#fff'; g.fillRect(0, 0, 32, 32);
+  return c.toDataURL('image/png');
+})()`);
+
+const dropped = await dropFile({ name: 'membrane.png', type: 'image/png', dataUrl: tinyPng, width: 0 });
+if (dropped.duringDrag === 'flex') {
+  pass('dragging a file over the page shows the drop overlay');
+} else {
+  fail(`the overlay should be shown during a drag, was "${dropped.duringDrag}"`);
+}
+if (dropped.afterDrop === 'none') {
+  pass('the overlay is hidden again after the drop');
+} else {
+  fail(`the overlay should be hidden after the drop, was "${dropped.afterDrop}"`);
+}
+if (dropped.loaded === 'membrane.png') {
+  pass('a dropped PNG reaches the field through the real listeners');
+} else {
+  fail(`the drop should have loaded membrane.png, status says "${dropped.loaded}"`);
+}
+
+// A file the browser cannot turn into pixels. The load must NOT change, and the
+// previous image must survive -- a rejected drop is not a reason to lose one.
+const rejected = await dropFile({ name: 'notes.txt', type: 'text/plain', dataUrl: 'x', width: 0 });
+if (rejected.loaded === 'membrane.png') {
+  pass('an undecodable drop is refused and leaves the loaded image alone');
+} else {
+  fail(`a .txt drop should change nothing, status says "${rejected.loaded}"`);
+}
+
+// Over MAX_DECODE_DIM, so `createImageBitmap`'s resize path runs. Bigger than
+// 2048 on both axes and not square-aligned to the cap.
+const big = await dropFile({ name: 'tomogram_big.png', type: 'image/png', dataUrl: null, width: 2600 });
+if (big.loaded.includes('tomogram') || big.loaded.includes('…')) {
+  pass(`an oversized image decodes through the downscale path (as "${big.loaded}")`);
+} else {
+  fail(`an oversized image should still load, status says "${big.loaded}"`);
+}
+
+await evaluate(`window.__fluoddity.dispatch({ kind: 'clearDensityImage' })`);
+const afterClear = await evaluate(`window.__fluoddity.status().densityImageName`);
+if (afterClear === '') {
+  pass('clearing empties the status name');
+} else {
+  fail(`after clearing, status still says "${afterClear}"`);
 }
 
 const errors = logs.filter((l) => /error|failed|Uncaught/i.test(l));

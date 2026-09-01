@@ -332,7 +332,7 @@ function parityConfig(): SimulationConfig {
     // the strongest single assertion in this file.
     densityForce: 0.0,
     densityStrafe: 0.0,
-    densityImageSense: 0.0,
+    densitySense: 0.0,
     rule: r.rule,
   };
 }

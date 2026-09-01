@@ -173,7 +173,7 @@ export interface SimulationConfig {
    * NEGATIVE repels. Force feeds velocity, so drag damps it and a rule can push
    * back; Strafe displaces position, so nothing can.
    *
-   * `densityImageSense` is 0..1 and has no sign on purpose. It adds the gradient
+   * `densitySense` is 0..1 and has no sign on purpose. It adds the gradient
    * to the SENSOR taps, so the image becomes something the rule reads rather
    * than something done to the particle -- and whether a given cohort is
    * attracted or repelled is then decided by its own mutated rule. The control
@@ -185,7 +185,7 @@ export interface SimulationConfig {
    */
   readonly densityForce: number;
   readonly densityStrafe: number;
-  readonly densityImageSense: number;
+  readonly densitySense: number;
   /** 80 floats -> 10 FourierCenters, each frequency(4) + amplitude(4). */
   readonly rule: readonly number[];
 }
@@ -225,7 +225,7 @@ export type SimulationConfigRequired = Pick<
  *   radialGravity               "False is what every config saved before this
  *                                existed meant."
  *   densityForce/densityStrafe/ Default 0: no image bias, which is what every
- *   densityImageSense           config written before the Density Image field
+ *   densitySense                config written before the Density Image field
  *                               existed meant. They are additive to the save
  *                               format in exactly the sense `force2` was.
  *
@@ -246,7 +246,7 @@ export const SIMULATION_CONFIG_DEFAULTS = {
   radialGravity: false,
   densityForce: 0.0,
   densityStrafe: 0.0,
-  densityImageSense: 0.0,
+  densitySense: 0.0,
   rule: [] as readonly number[],
 } as const satisfies Omit<SimulationConfig, keyof SimulationConfigRequired>;
 
