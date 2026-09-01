@@ -75,6 +75,15 @@ export const SEED = 'seed';
 export const CHOICE = 'choice';
 export const GATED = 'gated';
 export const GATED_INT = 'gated_int';
+/**
+ * A colour, stored as 0xRRGGBB in a single number.
+ *
+ * Its own kind rather than three SLIDERs: Tweakpane renders a real picker for a
+ * number bound with `view: 'color'` and hands a number back, so one entry buys
+ * the whole widget. `lo`/`hi` are the packed range and exist for `urlOptions`'s
+ * bounds check rather than for the widget, which ignores them.
+ */
+export const COLOR = 'color';
 export type Kind =
   | typeof SLIDER
   | typeof INPUT
@@ -83,7 +92,8 @@ export type Kind =
   | typeof SEED
   | typeof CHOICE
   | typeof GATED
-  | typeof GATED_INT;
+  | typeof GATED_INT
+  | typeof COLOR;
 
 /** One control. `field` is the property name on its source object. */
 export interface Setting {
@@ -782,6 +792,21 @@ export const SETTINGS: readonly Setting[] = [
   // The only entry here whose field changes nothing about the rendered frame.
   // It governs a `document.body` widget rather than a pass, which is why
   // `Preferences.showFpsCounter` is kept out of `DisplayPreferences`.
+  setting({
+    field: 'backgroundColor',
+    label: 'Background',
+    tier: BASIC,
+    source: PREFS,
+    kind: COLOR,
+    lo: 0x000000,
+    hi: 0xffffff,
+    help:
+      'The colour behind the simulation, including the letterbox bars. Composited ' +
+      'under the image, so dark backgrounds tint the empty space while the ' +
+      'particles keep their brightness. Note the render is EMISSIVE: on a light ' +
+      'background the particles wash out, so the useful range is dark colours.',
+    group: 'Display',
+  }),
   setting({
     field: 'showFpsCounter',
     label: 'Show FPS Counter',

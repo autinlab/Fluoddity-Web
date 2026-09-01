@@ -44,6 +44,7 @@ import {
   type Source,
   BOOL,
   CHOICE,
+  COLOR,
   CONFIG,
   GATED,
   GATED_INT,
@@ -707,6 +708,16 @@ export function paramsFor(setting: Setting): Record<string, unknown> {
     case INT:
     case GATED_INT:
       return { min: setting.lo, max: setting.hi, step: 1 };
+
+    case COLOR:
+      // NO min/max: Tweakpane's colour view takes neither, and passing them
+      // makes it fall back to a NUMBER INPUT -- which reads 0..16777215 as a
+      // decimal and is unusable. The registry's bounds exist for
+      // `urlOptions`'s range check, not for the widget.
+      //
+      // The value stays a plain number in and out (verified in the bundle), so
+      // nothing downstream has to know this row is a colour.
+      return { view: 'color' };
 
     case INPUT:
       // A DISRUPTIVE setting: it reallocates GPU resources and resets the

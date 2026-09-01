@@ -1122,6 +1122,76 @@ navigate, so there is nothing for the assertion to catch. That is the single mos
 load-bearing line in `imageDropBinding.ts` — getting it wrong loses the
 simulation, the project and the undo history — and it is checked by hand.
 
+## The background colour
+
+`Background` in the Display group. A `PREFS` value, so loading someone else's
+project cannot repaint your screen — the same rule that keeps brightness there.
+
+**One packed number, not three floats.** Tweakpane binds `view: 'color'`
+straight to a number and hands a number back (verified in the bundle, not taken
+from the docs), so `0xRRGGBB` buys a real colour picker for one registry entry —
+and `localStorage`, `coerce`, `Status.editPrefs` and `urlOptions`'s numeric
+proposal all carry it with no new machinery. Three fields would have meant three
+sliders and three of everything else. It rides `flags.yzw` in the frame-assembly
+uniform, which were already reserved, so no struct grew.
+
+Four decisions in the composite, all of which look arbitrary and are not:
+
+- **After the tone curve.** Before it, asinh would compress the chosen colour and
+  Brightness would scale it — so the swatch in the panel and the pixels on screen
+  would disagree by an amount that moves when an unrelated slider does. It also
+  stays out of the bloom, which reads its own texture: a background that glowed
+  would grow a halo around the frame's edge.
+- **Before the overlays.** The field overlay and the reticle `mix()` toward
+  white. Compositing after them would tint the reticle by the background, and it
+  is a UI element rather than part of the picture.
+- **Screen, not add.** They agree to within a rounding step for the dark colours
+  this is actually for, and diverge where it matters: a mid-grey background plus a
+  bright particle *adds* past 1 and clips to white, losing all structure in
+  exactly the regions worth looking at. Screen compresses instead. Where the
+  image is black it returns the background exactly; where the background is
+  black it returns the image exactly.
+- **The zero guard is not an optimization.** At black, `1 - (1-0)*(1-c)` is
+  algebraically `c` and *not* bit-identical to it — `1.0 - (1.0 - 0.1)` is
+  `0.09999999999999998`. Without the guard every render made before this feature
+  shifts by an ULP per channel: invisible, and enough to break the pixel
+  comparisons the browser tools make.
+
+**No sRGB conversion, and that is a decision rather than an omission.**
+`getPreferredCanvasFormat()` returns `bgra8unorm` — checked in the browser, not
+assumed — *not* the `-srgb` variant, so the hardware does no encoding on write
+and whatever the shader outputs is what the display shows. The composite happens
+after the tone curve, where the pipeline has already left linear space, so the
+byte the user picked is the byte that lands. Converting would render every colour
+darker than the swatch beside it.
+
+**The render is EMISSIVE, so light backgrounds wash the particles out.** The
+useful range is dark colours, and the help text says so. Making a white
+background work would mean an inversion mode where particles subtract rather than
+add — a different feature, deliberately not built.
+
+Two things it reaches for free, both worth knowing rather than discovering:
+recorded video and stamped share images get the background too, because
+`frameAssembly.wgsl` is the one composite and the `capture` remap runs through
+it. And the letterbox bars are tinted along with the empty world, because both
+are black today and colouring only the interior would draw a rectangle nobody
+asked for.
+
+### Verifying it
+
+`assemblerUniforms.test.ts` covers the unpack, and **the test that earns its keep
+is the channel order**: an R/B swap is invisible in review and actively *invited*
+here, because the surface format is `bgra8unorm` — "the format is BGRA, surely
+the lanes are too" is a reasonable-sounding mistake. It is wrong; the swizzle is
+the hardware's business on write and the shader writes plain rgb. The fixture uses
+a distinct value per channel so a swap or a rotation cannot pass.
+`shaders.test.ts` pins the composite between the tone curve and the overlays,
+since all three positions are plausible and none of the wrong ones errors.
+
+Confirmed in a browser by frame means over the canvas: `0xcc0000` raises only R
+(to 207 from a 17 baseline), `0x0000cc` only B, and `0x101a33` gives
+R < G < B matching `0x10 < 0x1a < 0x33`.
+
 ## Config storage: a manifest and IndexedDB
 
 `persistence.discover()` globs `configs/` and iterates its subfolders. **No

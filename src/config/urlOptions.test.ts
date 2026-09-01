@@ -358,3 +358,44 @@ test('a whole link parses end to end', () => {
   // `?preset` is not this module's business and must pass through untouched.
   assert.equal('preset' in settings, false);
 });
+
+// ---------------------------------------------------------------------------
+// THE BACKGROUND COLOUR, which is the one numeric proposal that is not a scalar
+// ---------------------------------------------------------------------------
+
+test('a background colour in a URL is parsed and range-checked', () => {
+  const ok = parseUrlOptions('?backgroundColor=1055283');
+  assert.equal(ok.settings.backgroundColor, 0x101a33);
+
+  // Out of range is DROPPED rather than clamped, like every other numeric
+  // proposal here -- see the header on why the third failure is not a clamp.
+  assert.equal(parseUrlOptions('?backgroundColor=99999999').settings.backgroundColor, undefined);
+  assert.equal(parseUrlOptions('?backgroundColor=-5').settings.backgroundColor, undefined);
+  assert.equal(parseUrlOptions('?backgroundColor=navy').settings.backgroundColor, undefined);
+});
+
+test('a proposed background is described in HEX, not as a decimal', () => {
+  // THE POINT OF THIS TEST. `formatNumber` renders 0x101a33 as "1710899", which
+  // tells a user being asked to approve an untrusted link's change nothing about
+  // what they are approving. The dialog exists so a link cannot repaint someone's
+  // screen unseen; a decimal defeats it while looking like it works.
+  const rows = describeChanges(
+    { backgroundColor: 0x101a33 },
+    { ...DEFAULT_PREFERENCES, backgroundColor: 0x000000 },
+    'particles',
+  );
+  const row = rows.find((r) => r.key === 'backgroundColor');
+  assert.ok(row !== undefined, 'the change must be described');
+  assert.equal(row.from, '#000000');
+  assert.equal(row.to, '#101a33');
+  assert.equal(row.label, 'Background');
+});
+
+test('a background equal to the current one is not offered as a change', () => {
+  const rows = describeChanges(
+    { backgroundColor: 0x101a33 },
+    { ...DEFAULT_PREFERENCES, backgroundColor: 0x101a33 },
+    'particles',
+  );
+  assert.equal(rows.find((r) => r.key === 'backgroundColor'), undefined);
+});

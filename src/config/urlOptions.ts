@@ -78,6 +78,8 @@ export interface ProposedSettings {
   readonly canvasAspect?: number;
   readonly brightness?: number;
   readonly tonemapSoftness?: number;
+  /** Packed 0xRRGGBB, like the preference it proposes. */
+  readonly backgroundColor?: number;
   readonly cameraMode?: CameraMode;
 }
 
@@ -104,6 +106,11 @@ const NUMERIC_FIELDS = [
   'canvasAspect',
   'brightness',
   'tonemapSoftness',
+  // A PACKED COLOUR (0xRRGGBB), which is why it belongs in the numeric list
+  // rather than needing a transport of its own -- it is one integer, and
+  // `boundedNumber` range-checks it against the registry entry's 0..0xffffff
+  // like any other. Someone sharing a link keeps their background.
+  'backgroundColor',
 ] as const satisfies readonly (keyof Preferences)[];
 
 type NumericField = (typeof NUMERIC_FIELDS)[number];
@@ -542,6 +549,12 @@ function formatNumber(value: number): string {
  * runs, and a row offering to turn on a view that is already on is exactly the
  * kind of no-op change the omission rule above exists to prevent.
  */
+/** A packed colour as `#RRGGBB`, which is the spelling users recognise. */
+function formatHexColor(value: number): string {
+  const packed = Math.max(0, Math.min(0xffffff, Math.trunc(value)));
+  return `#${packed.toString(16).padStart(6, '0')}`;
+}
+
 export function describeChanges(
   settings: ProposedSettings,
   current: Preferences,
@@ -561,8 +574,13 @@ export function describeChanges(
     rows.push({
       key: field,
       label: settingFor(PREFS, field)?.label ?? field,
-      from: formatNumber(existing),
-      to: formatNumber(proposed),
+      // A PACKED COLOUR IS SHOWN AS HEX. `formatNumber` would render
+      // 0x101a33 as "1710899", which tells a user being asked to approve a
+      // change nothing at all about what they are approving -- and this dialog
+      // exists precisely so an untrusted link cannot repaint their screen
+      // without them seeing what it wants.
+      from: field === 'backgroundColor' ? formatHexColor(existing) : formatNumber(existing),
+      to: field === 'backgroundColor' ? formatHexColor(proposed) : formatNumber(proposed),
     });
   }
 

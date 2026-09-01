@@ -209,3 +209,80 @@ test('the reserved trailing lane is zero', () => {
   );
   assert.deepEqual([...f32.slice(20, 24)], [0, 0, 0, 0]);
 });
+
+// ---------------------------------------------------------------------------
+// THE BACKGROUND COLOUR
+// ---------------------------------------------------------------------------
+
+/** The three background lanes: flags.yzw, i.e. float lanes 17..19. */
+function backgroundLanes(color: number): readonly number[] {
+  const f32 = new Float32Array(
+    packFrameAssemblyUniforms(VIEW, prefs({ backgroundColor: color }), false, NO_OVERLAYS),
+  );
+  return [...f32.slice(17, 20)];
+}
+
+test('the background unpacks to R, G, B in that order', () => {
+  // THE TEST THAT EARNS ITS KEEP. An R/B swap is invisible in code review and
+  // is actively INVITED here, because the surface format is `bgra8unorm` -- so
+  // "the format is BGRA, surely the lanes are too" is a reasonable-sounding
+  // mistake. It is wrong: the swizzle is the hardware's business on write, and
+  // the shader writes plain rgb.
+  //
+  // A distinct value per channel, so a swap cannot pass. 0x33 / 0x66 / 0x99 are
+  // each exact in binary after dividing by 255? They are not -- hence fround.
+  const [r, g, b] = backgroundLanes(0x336699);
+  assert.equal(r, Math.fround(0x33 / 255));
+  assert.equal(g, Math.fround(0x66 / 255));
+  assert.equal(b, Math.fround(0x99 / 255));
+  assert.ok(r < g && g < b, 'a swapped or rotated triple would break this ordering');
+});
+
+test('pure channels land in exactly one lane', () => {
+  assert.deepEqual(backgroundLanes(0xff0000), [1, 0, 0]);
+  assert.deepEqual(backgroundLanes(0x00ff00), [0, 1, 0]);
+  assert.deepEqual(backgroundLanes(0x0000ff), [0, 0, 1]);
+});
+
+test('black is exactly zero, which is what the shader guard tests', () => {
+  // The shader SKIPS the composite when every lane is 0, so that renders made
+  // before this feature stay bit-identical. A non-zero value here -- from a
+  // rounding step, or from an sRGB conversion someone adds later -- would turn
+  // the guard off permanently and shift every pixel by an ULP.
+  assert.deepEqual(backgroundLanes(0x000000), [0, 0, 0]);
+});
+
+test('white is exactly one, not 254/255', () => {
+  // `>> 8` instead of `/ 255` is the classic version of this and caps at
+  // 0.996 -- invisible alone, and it means "white" is never quite white.
+  assert.deepEqual(backgroundLanes(0xffffff), [1, 1, 1]);
+});
+
+test('a hand-edited out-of-range colour is clamped, not wrapped', () => {
+  // `localStorage` is untyped JSON a user can edit, and a URL can propose this
+  // value too. A negative number left unclamped would shift into other lanes
+  // through the bit masks and put a colour nobody chose on screen.
+  assert.deepEqual(backgroundLanes(-1), [0, 0, 0]);
+  assert.deepEqual(backgroundLanes(0xffffff + 1000), [1, 1, 1]);
+  // Fractional values are truncated rather than rounded across a channel edge.
+  assert.deepEqual(backgroundLanes(0xff0000 + 0.9), [1, 0, 0]);
+});
+
+test('the background does not disturb the reticle flag it shares a vec4 with', () => {
+  // flags.x is a bit-cast int and the background is three floats beside it. A
+  // packer writing the colour as a vec4 would clobber the flag, and the symptom
+  // -- the Shove reticle silently losing its dashes -- is nowhere near the cause.
+  const overlays: OverlayState = { ...NO_OVERLAYS, reticleDashed: true };
+  const buffer = packFrameAssemblyUniforms(
+    VIEW,
+    prefs({ backgroundColor: 0x336699 }),
+    false,
+    overlays,
+  );
+  assert.equal(new Int32Array(buffer)[16], 1);
+  assert.deepEqual([...new Float32Array(buffer).slice(17, 20)].map(Math.fround), [
+    Math.fround(0x33 / 255),
+    Math.fround(0x66 / 255),
+    Math.fround(0x99 / 255),
+  ]);
+});

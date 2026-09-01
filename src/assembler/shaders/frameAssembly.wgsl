@@ -27,7 +27,7 @@ struct FrameAssemblyUniforms {
     // x: bloom_intensity   y: brightness   z: tonemap_softness   w: field_opacity
     tone       : vec4f,
     reticle    : vec4f,   // xy: center (canvas uv)   z: radius   w: reserved
-    flags      : vec4f,   // x: reticle_dashed(i)   yzw: reserved
+    flags      : vec4f,   // x: reticle_dashed(i)   yzw: background rgb
     // xy: crop half-extent as a fraction of the window   z: enable
     // w: how far the surround is dimmed, 0..1
     crop       : vec4f,
@@ -46,6 +46,8 @@ struct FrameAssemblyUniforms {
 @group(1) @binding(3) var tex_sampler : sampler;
 
 fn reticle_dashed() -> bool { return bitcast<i32>(u.flags.x) != 0; }
+/** The background colour, already unpacked to 0..1 by the host. */
+fn background() -> vec3f { return u.flags.yzw; }
 
 // Turns the field's small magnitudes into visible grey. A default stroke peaks
 // near 0.06 (0.01 * draw_power/5 / draw_size), so this puts a typical stroke
@@ -142,6 +144,50 @@ fn fs_main(in: FsQuadVsOut) -> @location(0) vec4f {
     let len = length(color);
     if (len > 0.0) {
         color *= asinh_f32(len * softness) / (len * softness);
+    }
+
+    // ------------------------------------------------------------------
+    // THE BACKGROUND, composited after the tone curve and before the overlays.
+    //
+    // ## AFTER THE CURVE, so the colour you pick is the colour you get
+    //
+    // Before it, the asinh curve would compress the background along with
+    // everything else and Brightness would scale it -- so the swatch in the
+    // panel and the pixels on screen would disagree, by an amount that changes
+    // as you move an unrelated slider. It also stays out of the bloom, which
+    // reads its own texture: a background that glowed would be a background that
+    // grew a halo around the frame's edge.
+    //
+    // ## BEFORE THE OVERLAYS, because they sit on top of everything visible
+    //
+    // The field overlay and the reticle `mix()` toward white. Compositing after
+    // them would tint the reticle by the background and make the ring hard to
+    // see against a coloured one -- it is a UI element, not part of the picture.
+    //
+    // ## SCREEN, NOT ADD
+    //
+    // `add` and `screen` agree to within a rounding step for the dark colours
+    // this is actually for, and diverge where it matters: a mid-grey background
+    // plus a bright particle ADDS past 1 and clips to white, losing all
+    // structure in exactly the regions worth looking at. Screen compresses
+    // instead, so a lighter background degrades gracefully rather than
+    // flattening. Where the image is black it returns the background exactly,
+    // and where the background is black it returns the image exactly.
+    //
+    // ## THE ZERO GUARD IS NOT AN OPTIMIZATION
+    //
+    // At black, `1 - (1-0)*(1-c)` is algebraically `c` but NOT bit-identical to
+    // it: `1.0 - (1.0 - 0.1)` is 0.09999999999999998. Every render made before
+    // this feature existed would shift by one ULP in every channel, which is
+    // invisible and would still break the pixel-exact screenshot comparisons the
+    // browser tools make. The guard is what keeps the default path untouched.
+    //
+    // Applied to the WHOLE FRAME, letterbox bars included. The bars are black
+    // today and so is the empty world, so tinting both keeps them one surface;
+    // colouring only the interior would draw a rectangle nobody asked for.
+    let bg = background();
+    if (any(bg > vec3f(0.0))) {
+        color = 1.0 - (1.0 - bg) * (1.0 - color);
     }
 
     // ------------------------------------------------------------------

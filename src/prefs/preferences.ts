@@ -64,6 +64,25 @@ export interface Preferences {
   readonly tonemapSoftness: number;
 
   /**
+   * The background, PACKED AS 0xRRGGBB in a single number.
+   *
+   * One field rather than three, because Tweakpane binds `view: 'color'`
+   * straight to a number and hands a number back (verified in the bundle, not
+   * taken from the docs) -- so the panel gets a real colour picker for one
+   * registry entry, and `localStorage`, `coerce`, `Status.editPrefs` and
+   * `urlOptions`'s numeric proposal all carry it with no new machinery. Three
+   * float fields would have meant three sliders and three of everything else.
+   *
+   * A PREFERENCE, not config: loading someone else's project must not repaint
+   * your background, which is the same rule that keeps brightness here.
+   *
+   * 0 (black) is the default and is what every session before this had. The
+   * shader SKIPS the composite entirely at 0, so an untouched setting renders
+   * bit-for-bit what it always did -- see `frameAssembly.wgsl`.
+   */
+  readonly backgroundColor: number;
+
+  /**
    * Temporal supersampling. TARGET samples per displayed frame -- the achieved
    * count is the nearest one that divides `physicsSteps`, so this is a target
    * rather than a promise. See `camera/blurSchedule.ts`.
@@ -296,6 +315,7 @@ export const DEFAULT_PREFERENCES: Preferences = Object.freeze({
   brightness: 2.0,
   physicsSteps: 5,
   tonemapSoftness: 2.5,
+  backgroundColor: 0x000000,
   motionBlurSamples: 1,
   // ON by default. The counter is how someone learns their machine has room to
   // spare -- or has none -- and neither is discoverable from a checkbox that
@@ -355,6 +375,10 @@ export const PREFERENCE_KINDS = {
   brightness: 'float',
   physicsSteps: 'int',
   tonemapSoftness: 'float',
+  // 'int', because it is three bytes packed into one number -- a float here
+  // would let a hand-edited localStorage entry land 0x1a2b3c.5 and shift every
+  // channel. `coerce` truncates, and the shader masks each byte anyway.
+  backgroundColor: 'int',
   motionBlurSamples: 'int',
   showFpsCounter: 'bool',
   physicsSliderOpen: 'bool',
@@ -576,4 +600,5 @@ export type DisplayPreferences = Pick<
   | 'bloomIntensity'
   | 'bloomRadius'
   | 'fieldOpacity'
+  | 'backgroundColor'
 >;

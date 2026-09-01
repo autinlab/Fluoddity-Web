@@ -40,6 +40,7 @@ export const BLOOM_UPSAMPLE_UNIFORM_SIZE = 16;
  *                                         z tonemap_softness w field_opacity
  *   reticle    : vec4f  (16)  offset 48   xy center  z radius
  *   flags      : vec4f  (16)  offset 64   x reticle_dashed(i)
+ *                                         yzw background rgb, 0..1 linear-ish
  *   crop       : vec4f  (16)  offset 80   xy half-extent  z enable  w dim
  *   capture    : vec4f  (16)  offset 96   xy uv scale  zw uv offset
  *
@@ -192,8 +193,28 @@ export function packFrameAssemblyUniforms(
   f32[13] = overlays.reticleCenter[1];
   f32[14] = overlays.reticleRadius;
 
-  // flags: x reticle_dashed(i), yzw reserved
+  // flags: x reticle_dashed(i), yzw background rgb
   i32[16] = overlays.reticleDashed ? 1 : 0;
+
+  // THE BACKGROUND, UNPACKED HERE rather than in the shader.
+  //
+  // It is stored as one number (0xRRGGBB) because that is what Tweakpane's
+  // colour view binds to, and the shader wants three floats -- so somebody has
+  // to split it. The host is the cheaper place: this runs once per frame, a
+  // bitcast-and-mask in the shader would run once per PIXEL, and the three lanes
+  // it would need are already here.
+  //
+  // NO sRGB->LINEAR CONVERSION, and that is a decision rather than an omission.
+  // `getPreferredCanvasFormat()` returns `bgra8unorm` (checked in the browser),
+  // NOT the `-srgb` variant -- so the hardware does no encoding on write and
+  // whatever the shader outputs is what the display shows. The composite happens
+  // AFTER the tone curve, where the pipeline has already left linear space, so
+  // the byte the user picked is the byte that lands. Converting here would make
+  // every chosen colour render darker than the swatch beside it.
+  const packed = Math.max(0, Math.min(0xffffff, Math.trunc(prefs.backgroundColor)));
+  f32[17] = ((packed >> 16) & 0xff) / 255;
+  f32[18] = ((packed >> 8) & 0xff) / 255;
+  f32[19] = (packed & 0xff) / 255;
 
   // crop: xy half-extent as a fraction of the window, z enable, w dim amount.
   //

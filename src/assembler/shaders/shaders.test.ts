@@ -224,3 +224,39 @@ test('bloom is composited BEFORE brightness and the curve', () => {
   assert.ok(bloom < brightness, 'bloom must be added before brightness');
   assert.ok(brightness < curve, 'brightness must be applied before the tone curve');
 });
+
+test('the background is composited after the tone curve and before the overlays', () => {
+  // ORDER IS THE FEATURE, and all three positions are plausible.
+  //
+  // Before the curve, asinh would compress the chosen colour and Brightness
+  // would scale it -- so the panel's swatch and the screen would disagree by an
+  // amount that moves when an unrelated slider does. After the overlays, the
+  // reticle and the field overlay would be tinted by it, and both are UI rather
+  // than picture. Neither mistake errors; each just looks slightly wrong.
+  const source = stripComments(expand('frameAssembly.wgsl'));
+  const curve = source.indexOf('asinh_f32');
+  const composite = source.indexOf('1.0 - (1.0 - bg)');
+  // `let inside` rather than a function name: `expand()` resolves the include,
+  // so common.wgsl's DEFINITION of every coordinate helper appears near the top
+  // of the expanded source and `indexOf` would find that instead of the call.
+  const overlays = source.indexOf('let inside');
+
+  assert.ok(curve > 0, 'the tone curve must exist');
+  assert.ok(composite > 0, 'the background composite must exist');
+  assert.ok(overlays > 0, 'the overlay block must exist');
+  assert.ok(composite > curve, 'the background must be composited AFTER the tone curve');
+  assert.ok(composite < overlays, 'the background must be composited BEFORE the overlays');
+});
+
+test('the background composite is skipped at black', () => {
+  // Not an optimization: `1 - (1-0)*(1-c)` is algebraically `c` and not
+  // bit-identical to it, so without the guard every render made before this
+  // feature shifts by an ULP per channel -- invisible, and enough to break the
+  // pixel comparisons the browser tools make.
+  const source = stripComments(expand('frameAssembly.wgsl'));
+  assert.match(
+    source,
+    /if\s*\(\s*any\(\s*bg\s*>\s*vec3f\(0\.0\)\s*\)\s*\)/,
+    'the background composite must be guarded on a non-black colour',
+  );
+});

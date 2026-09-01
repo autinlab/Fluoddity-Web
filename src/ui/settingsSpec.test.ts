@@ -132,6 +132,8 @@ test('the registry has the same 35 entries the desktop does, plus the web-only o
     'densitySense',
     'densityStrafe',
     'densityForce',
+    // No desktop equivalent: it renders on black and has no background control.
+    'backgroundColor',
   ];
   const ported = SETTINGS.filter((s) => !WEB_ONLY.includes(s.field));
   assert.equal(ported.length, 35);
