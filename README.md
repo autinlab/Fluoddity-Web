@@ -1122,6 +1122,201 @@ navigate, so there is nothing for the assertion to catch. That is the single mos
 load-bearing line in `imageDropBinding.ts` — getting it wrong loses the
 simulation, the project and the undo history — and it is checked by hand.
 
+## Searching the parameter space, and stepping without a clock
+
+`tools/search.mjs` runs many simulations, scores each one, and keeps the good
+ones. It exists because nothing else in this repository measures a simulation --
+there is no metric, no statistic, no histogram anywhere in `src/` or `tools/` --
+and because finding a look otherwise means dragging sliders and judging by eye.
+
+```
+npm run dev                                   # required; this drives a real page
+
+node tools/determinismCheck.mjs               # the gate; run it first
+node tools/search.mjs --selftest              # a known answer
+node tools/search.mjs --stimulus a.png --target b.png --budget 60 --out DIR
+node tools/search.mjs --stimulus a.png --describe "..." --pop 12 --out DIR
+node tools/search.mjs --continue DIR
+node tools/search.mjs --promote DIR/cand-g1-0007 --name Filaments
+```
+
+**Two images, and they are not the same image.** `--stimulus` is what is dropped
+into the density field: the input that biases the particles. `--target` is what
+the render should come to look like. Collapsing them would only ever ask "did
+the particles land on the picture that is pushing them"; keeping them apart asks
+"which parameters turn *this* stimulus into *that* behaviour". `--target`
+defaults to `--stimulus`, which recovers the simpler question as a special case.
+`--describe` replaces the target with a sentence, and is described below.
+
+### THE STEP IS COUNTED, NOT WAITED FOR
+
+Every other browser tool here advances the simulation by sleeping — `await
+sleep(4000)`, then screenshot. `fieldCheck.mjs`'s header records what that costs:
+its region metrics "moved less than the run-to-run variance of a chaotic
+simulation", and one of them separated cleanly on one run and **inverted on the
+next with no code change**. A parameter search scored that way fits noise.
+
+The simulation is not the source of that variance. Every stochastic draw in
+`entityUpdate.wgsl` is a pure hash of index and frame count, there is no
+`Math.random` on the GPU and no clock in the step, and the loop is fixed-count.
+The variance is entirely in **how many rAF frames the machine delivered during
+the sleep**. So the harness pauses and steps by hand:
+
+```
+dispatch togglePause          rAF stops calling runFrame
+dispatch reset                zeroes _frameCount; the sentinel is consumed
+                              INSIDE runFrame, which is what probeFrame calls,
+                              so this is safe while paused
+await probeFrame() x N        exactly N * physicsSteps sub-steps
+screenshot
+```
+
+`probeFrame()` exists for the calibration ladder and is documented there as
+"physics only, no camera, no assembler, no pick" — which is exactly what is
+wanted, since it is the only way to advance the simulation without going through
+rAF. `determinismCheck.mjs` asserts the result: identical parameters give a
+**byte-identical** screenshot, and `diagnostics.frameCount` equals `N *
+physicsSteps` exactly. The second assertion is not redundant — `probeFrame`
+re-reads `prefs.physicsSteps` every call, so two runs can agree with each other
+while both ran at a calibrated rate nobody asked for.
+
+### THE SETTLED STILL, WHICH SILENTLY MAKES ALL OF THAT INVISIBLE
+
+A paused frame does not simply re-render the frozen state. The first paused
+frame is a **settle** that averages `physicsSteps` samples into the accumulator,
+and every later paused frame then "records NOTHING AT ALL -- no clear, no
+render", holding that texture, because the physics it depicts has been advanced
+past and cannot be re-rendered.
+
+So stepping with `probeFrame` and screenshotting returns **the same picture every
+time** — with no error, looking entirely plausible, and every candidate scoring
+identically. The hold is dropped when `fieldEdited` is true, which is why
+`clearStrafeField` is dispatched before each capture; it is listed there
+deliberately, because "a held frame renders nothing, so anything that changes
+what the picture should contain has to drop the still". Once dropped,
+`settledView` is null and `settledViewMatches(null, v)` is false forever after,
+so every later paused frame renders live. Clearing a field the harness never
+paints costs nothing.
+
+### A one-slider hang, found by the search and reproducible without it
+
+**This is a defect in the app, not an artifact of the harness.** With `Tangle` —
+the default preset — dragging **Axial Force** from its shipped `0.022` to `0.06`
+stops the tab responding within seconds. That is about one percent of the
+slider's `-2 .. 2` travel. `Page.captureScreenshot` never returns, shortly
+afterwards neither does `Runtime.evaluate`, and yet the page's own rAF is still
+firing, every pipeline still reports built, and nothing is logged.
+
+Measured on a **live, unpaused** page, a fresh browser per row, the value pushed
+through the app's own `editSetting` command and then left alone for six seconds.
+No harness stepping of any kind is involved:
+
+| preset | change | result |
+|---|---|---|
+| Tangle | `axialForce` 0.04 | survives |
+| Tangle | `axialForce` **0.06** | **wedges** |
+| Tangle | `axialForce` 0.1, 0.2, 0.3, 0.371, 0.5, 0.8, 2.0 | wedges |
+| Tangle | `trailPersistence` 0.75 | wedges (0.85 survives) |
+| Tangle | `strafePower` 0.42 | wedges (0.35 survives) |
+| Tangle | `lateralForce` 0.9 | survives |
+| **Cars** | as shipped (`axialForce` **0.371**) | **survives** |
+| **Cars** | `axialForce` **0.8** | **survives** |
+
+**So it is not the value, it is the value against a particular rule.** Fourteen
+of the twenty-two shipped presets carry `axialForce` 0.371 and run fine; `Cars`
+tolerates 0.8. `Tangle` cannot survive 0.06. Whatever the mechanism, it is a
+property of the Fourier rule the preset carries, which is why no fixed bound on
+the slider would express it — and why the search cannot be made safe by
+narrowing ranges.
+
+Three consequences, all of them in the tooling rather than in `src/`:
+
+- **Every CDP call has a deadline** (`lib/cdp.mjs`). A page-side promise that
+  never settles leaves node idle with no error and no indication of which call
+  is stuck. A healthy capture takes ~300ms, so the capture deadline is 20s.
+- **A wedged candidate costs one candidate, not the run.** `search.mjs` records
+  it as `hung` with its parameters intact — which maps the dangerous region
+  rather than merely surviving it — replaces the browser, and continues.
+  `--max-hangs` stops a run that has walked entirely into such a region.
+- **Chrome is killed by process GROUP.** Killing only the parent leaves the
+  zygote and GPU process alive, holding the GPU and still rendering. Two
+  survivors from an interrupted run were enough to stall the next one.
+
+### Sampling around a preset, not across the box
+
+A Latin hypercube over the full registry range wedged six of seven candidates.
+Since the danger is rule-dependent rather than per-axis, no bound fixes that. A
+preset, though, is a point somebody tuned until it looked right, so it is
+known-alive and its neighbourhood mostly is too: generation 1 samples a band around the
+loaded preset's own values, read back through `status().editConfig`. `--around`
+widens the band, `--wide` recovers the whole box. Later generations hill-climb
+from the best few with the step **halved each generation, starting at half the
+band** — it started at a constant instead, which was wider than the band, and
+generation 2 walked straight out of the alive region with every candidate
+wedging.
+
+The three density channels are always searched at full range: they are the
+subject, none of them wedged anything on its own, and every shipped preset has
+them at zero because the feature is newer, so the library's envelope carries no
+information about them.
+
+Expect roughly a third to a half of candidates to wedge and be replaced. That is
+a measurement of the engine, not of the harness — and the regime that draws thin
+filaments sits directly against the regime that hangs, so a search aimed at the
+most interesting pictures will sit near that edge by construction.
+
+The 80-float rule is not swept coordinate-wise — 80 dimensions, and a 1-ULP
+difference in one coefficient produces a completely different rule.
+`mutationScale` x `mutationSeed` is the cheap two-parameter handle on it.
+
+### Scoring, and why edge alignment is primary
+
+`lib/score.ts` is pure and has a `node --test` beside it, like every other
+decidable leaf here. It reduces the render and the target to small luma grids
+and reports three numbers:
+
+| metric | what it says |
+|---|---|
+| **edge alignment** | correlation against a Sobel map of the target — **the rank** |
+| occupancy | correlation against the target's raw luma — reported, never ranked on |
+| structure | mean, deviation and lit fraction — a **rejector**, not a score |
+
+Edge alignment is primary because of what the field physically is.
+`densityGradient.ts` produces a Sobel of a blurred image, and a gradient is zero
+wherever that image is locally flat — **including deep inside a large uniform
+bright region**. A white disc pushes particles across its rim and then stops
+pushing them. So a correctly-working simulation draws outlines, not fills, and
+ranking on occupancy would spend the budget walking away from the physics
+working. The rejector throws out the two degenerate pictures a correlation
+loves, a uniform grey wash and a single blob, before ranking rather than merely
+scoring them low.
+
+Grids are computed **in the page**, for `fieldCheck.mjs`'s reason: the browser
+already has a PNG decoder. Note that `drawImage` on the live WebGPU canvas
+returns all zeros, so the screenshot is decoded rather than the canvas read.
+
+### `--describe`, where the scorer is a reader
+
+No metric reads "filaments that braid and slowly rotate". So that mode runs one
+generation, writes `sheet-gN.png` — a labelled contact sheet — and stops. A
+reader ranks the indices into `ranking.json`, and `--continue` climbs from them.
+It is the same search with a person in the scoring seat.
+
+### Nothing reaches `configs/` until you say so
+
+Every candidate writes a PNG and a JSONL line carrying its parameters, its
+scores and its **full v8 document** into `--out`. `--promote` is a separate
+invocation that validates one through `fromDocument` — the real reader, so a bad
+document fails with the message the app itself would give — and writes it with
+`withFloatZeros` so a promoted preset is textually indistinguishable from its
+neighbours. That function moved to `lib/presetFormat.mjs` and `linkToConfig.mjs`
+now imports it, because two tools writing into one directory have to agree about
+style. Then run `npm run sync:configs`; a file in `configs/` is invisible to the
+app until the manifest is rebuilt.
+
+Chrome runs on a fresh `--user-data-dir`, so `saveConfig` into IndexedDB does
+**not** survive a run. Export through `projectDocument()`.
+
 ## The background colour
 
 `Background` in the Display group. A `PREFS` value, so loading someone else's

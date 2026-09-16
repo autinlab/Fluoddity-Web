@@ -53,12 +53,26 @@ node tools/configCheck.mjs                       # manifest + IndexedDB, across 
 node tools/uiCheck.mjs                           # gated latch, reveal toggle
 node tools/saveTransferCheck.mjs                 # save round trip through real IndexedDB
 node tools/densityCheck.mjs                      # density image field + its Y flip
+node tools/determinismCheck.mjs                  # the parameter search's gate
+node tools/search.mjs --selftest                 # ...and its known answer
 ```
 
 Most of these hardcode a **Windows** Chrome path and read `CHROME_PATH` as an
 override, so on macOS:
 `CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"`.
 `densityCheck.mjs` defaults per platform and needs no override.
+
+**The parameter search** (`tools/search.mjs`, `tools/lib/`) runs many
+simulations, scores them and promotes the winners — see README "Searching the
+parameter space, and stepping without a clock". Three things there are not
+guessable: it advances physics with `probeFrame()` while PAUSED rather than
+sleeping, so a run is byte-reproducible; it must dispatch `clearStrafeField`
+before every capture or the paused **settled still** hands back the same frozen
+picture for every candidate, silently; and **one slider hangs the tab** — on the
+default preset, `axialForce` 0.06 (shipped: 0.022, slider: -2..2) stops the page
+responding, reproducible on a live unpaused page through `editSetting` with no
+harness involved. It is rule-dependent, not a bad value: `Cars` ships 0.371 and
+survives 0.8. See README's table.
 
 Other tools: `tools/linkToConfig.mjs` (share link → `.json` preset),
 `tools/qrSurvival.mjs` + `tools/qrDecodeImage.mjs` (does the QR stamp survive a

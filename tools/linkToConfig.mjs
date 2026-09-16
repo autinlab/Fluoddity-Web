@@ -52,6 +52,10 @@ import { fileURLToPath } from 'node:url';
 import { fromDocument } from '../src/config/persistence.ts';
 import { decodeShareText } from '../src/config/shareLink.ts';
 
+// Shared with `search.mjs --promote`, which writes into the same directory
+// and must produce textually identical files. See `lib/presetFormat.mjs`.
+import { withFloatZeros } from './lib/presetFormat.mjs';
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
 const CONFIGS_DIR = path.join(ROOT, 'configs');
@@ -142,35 +146,6 @@ try {
 // above proves it loads; that is what validation is for, and it is a separate
 // job from deciding what to write.
 const json = `${withFloatZeros(JSON.stringify(document, null, 2))}\n`;
-
-/**
- * Write `1.0` where JavaScript would write `1`.
- *
- * PURELY COSMETIC, and worth the twelve lines anyway. Every file already in
- * `configs/` was written by the retired Python app, whose `json` module keeps a
- * float's `.0`; JavaScript has one number type and `JSON.stringify(1.0)` is
- * `"1"`. The reader does not care -- both parse to the same double, and
- * `deepEqual` on the parsed documents is exact -- but without this, a preset
- * promoted through this tool is textually unlike its neighbours in a way that
- * shows up in every future diff and makes the library look inconsistent.
- *
- * Scoped to VALUE POSITIONS ONLY (`: 1` and array members), so nothing touches
- * `"version": 8`, `"cohorts": 4` or the enum lanes, which are genuinely
- * integers on both sides and are written without a `.0` there too.
- */
-function withFloatZeros(text) {
-  return text
-    .split('\n')
-    .map((line) => {
-      // `"key": <int>` -- but not the keys that are really integers.
-      const INTEGER_KEYS = /"(version|cohorts|boundary_conditions|initial_conditions)"/;
-      if (INTEGER_KEYS.test(line)) return line;
-      return line
-        .replace(/(:\s)(-?\d+)(,?)$/, '$1$2.0$3')
-        .replace(/^(\s*)(-?\d+)(,?)$/, '$1$2.0$3');
-    })
-    .join('\n');
-}
 
 if (has('--stdout')) {
   process.stdout.write(json);
