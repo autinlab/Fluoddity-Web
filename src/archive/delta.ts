@@ -172,7 +172,33 @@ const SCALAR_CONFIG_FIELDS = [
   'sensorAngleJitter',
   'sensorDistanceJitter',
   'radialGravity',
+  'densityForce',
+  'densityStrafe',
+  'densitySense',
 ] as const satisfies readonly (keyof SimulationConfig)[];
+
+/**
+ * THE LIST ABOVE MUST NAME EVERY SCALAR IN `SimulationConfig`, and `satisfies`
+ * does not check that -- it checks the reverse, that each name is real.
+ *
+ * An omission is not a correctness bug, because `deriveDelta` falls through to
+ * `full` when it recognizes nothing, which is why this went unnoticed when the
+ * three density channels were added on another branch and merged in: every
+ * density-only edit silently stored ~1.8 kB instead of ~40 bytes and reached the
+ * visit log as an unnamed full state rather than as the field the user moved.
+ * Quiet, survivable, and exactly the kind of thing that is never found by
+ * reading. This turns the next omission into a compile error.
+ */
+type UnlistedScalar = Exclude<
+  keyof SimulationConfig,
+  'rule' | (typeof SCALAR_CONFIG_FIELDS)[number]
+>;
+// The tuple brackets are load-bearing: a bare `UnlistedScalar extends never`
+// distributes over the union and yields `never` even when the union is empty,
+// so the check would pass for every possible input. Wrapped, it compares the
+// types themselves. The error names the missing field.
+const _everyScalarIsListed: [UnlistedScalar] extends [never] ? true : UnlistedScalar = true;
+void _everyScalarIsListed;
 
 const WORLD_FIELDS = [
   'trailPersistence',

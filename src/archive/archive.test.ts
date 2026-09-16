@@ -209,6 +209,22 @@ test('a reroll is one field, with the drawn seed read out of the after-state', (
   });
 });
 
+test('a density channel is one field, like every other scalar', () => {
+  // The three Density Image channels were added on one branch while the archive
+  // was written on another, so they were missing from `SCALAR_CONFIG_FIELDS`
+  // after the merge. Nothing failed -- `deriveDelta` fell through to `full`, and
+  // `full` is always correct -- so a density-only edit just quietly stored the
+  // whole state and reached the visit log with no field name on it. This is the
+  // runtime half of the check; `delta.ts`'s exhaustiveness guard is the other.
+  const after = editSelected(base, 'densityForce', 0.5);
+  assert.deepEqual(deriveDelta(base, after), {
+    kind: 'configField',
+    config: 0,
+    field: 'densityForce',
+    value: 0.5,
+  });
+});
+
 test('a cohort selection stores the cohort, not the eighty floats', () => {
   // The adopted rule is a pure function of the parent state and the cohort
   // (`rule.wgsl`), so the number is sufficient and the rule is recomputed
