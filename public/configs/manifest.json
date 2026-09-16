@@ -90,6 +90,30 @@
           "path": "Core/Tension.json"
         },
         {
+          "name": "TomoBands",
+          "path": "Core/TomoBands.json"
+        },
+        {
+          "name": "TomoClusters",
+          "path": "Core/TomoClusters.json"
+        },
+        {
+          "name": "TomoContours",
+          "path": "Core/TomoContours.json"
+        },
+        {
+          "name": "TomoRods",
+          "path": "Core/TomoRods.json"
+        },
+        {
+          "name": "TomoSegment",
+          "path": "Core/TomoSegment.json"
+        },
+        {
+          "name": "TomoVesicles",
+          "path": "Core/TomoVesicles.json"
+        },
+        {
           "name": "Weave",
           "path": "Core/Weave.json"
         }
