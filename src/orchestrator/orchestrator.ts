@@ -52,6 +52,7 @@ import {
   NO_OVERLAYS,
   type CropOverlay,
   type OverlayState,
+  type ReticleStyle,
 } from '../assembler/assemblerUniforms.ts';
 import { Camera } from '../camera/camera.ts';
 import {
@@ -73,6 +74,10 @@ import {
   describeHistoryStep,
   historyLabelFor,
 } from './notices.ts';
+import { ProjectArchive, openArchiveStore } from '../archive/archive.ts';
+import { clearArchive, openArchiveDb } from '../archive/archiveDb.ts';
+import { type ArchiveDocument, buildArchiveDocument } from '../archive/export.ts';
+import type { ArchiveTag } from '../archive/delta.ts';
 import { ParticleSystem } from '../particleSystem/particleSystem.ts';
 // TYPE-ONLY. `recorder.ts` reaches mediabunny through a dynamic `import()`, and
 // a value import here would pull the whole encoder into the main bundle for
@@ -92,6 +97,12 @@ import { densityGradient, toGrayscaleThumbnail } from '../densityField/densityGr
 import { SHARE_IMAGE_MAX_DIM, type SharedImage } from '../config/shareCodec.ts';
 import { DENSITY_SCALE_DEFAULT, clampDensityScale } from '../densityField/densityScale.ts';
 import type { RgbaImage } from '../share/qrRender.ts';
+import {
+  type FieldLayer,
+  BRUSH_MODES,
+  LINE_STROKE_GAIN,
+} from '../strafeField/fieldLayer.ts';
+import type { BrushParams } from '../strafeField/strafeUniforms.ts';
 import { screenToWorld, worldToUv } from '../particleSystem/coords.ts';
 import {
   type PickResult,
@@ -111,7 +122,9 @@ import { type SavedConfig, sanitizeName, toDocument } from '../config/persistenc
 import {
   type Preferences,
   DEFAULT_PREFERENCES,
+  PREFERENCE_KEYS,
   loadPreferences,
+  fieldStrengthsFor,
   requiresRestart,
   savePreferences,
   withValue,
@@ -134,12 +147,15 @@ import {
   type Command,
   type CommandBus,
   type MouseMode,
+  isPaintingTool,
+  layerForMouseMode,
+  reticlePlacement,
   type PreviewSurface,
   type Status,
 } from './commands.ts';
 import { type Checkpoint, CheckpointStore } from './clipboardCommands.ts';
 import { RESET_ON_CONFIG_LOAD, RESET_ON_CONFIG_UNDO_REDO } from './featureFlags.ts';
-import { type PendingStroke, strokeFor } from './drawingCommands.ts';
+import { type LineAnchor, type PendingStroke, strokeFor } from './drawingCommands.ts';
 import { shoveState } from './shoveCommands.ts';
 import {
   applySettingEdit,
@@ -268,13 +284,26 @@ export class Orchestrator implements CommandBus {
   private pendingStroke: PendingStroke | null = null;
 
   /**
-   * Set by `clearStrafeField`, consumed by the frame loop.
+   * Layers awaiting a clear, set by `clearStrafeField` and drained by the frame
+   * loop.
    *
    * Same shape and same reason as the accumulator's clear: zeroing a texture is
    * a render pass, a render pass needs an encoder, and a command handler runs
    * outside one.
+   *
+   * **A SET RATHER THAN A BOOLEAN**, because the two layers clear independently
+   * and both buttons are on screen at once -- pressing Clear Walls and Clear
+   * Trails in the same frame must do both, where a single flag would drop one.
    */
-  private clearFieldPending = false;
+  private readonly clearFieldPending = new Set<FieldLayer>();
+
+  /**
+   * The line tool's anchor, in field uv, or `null` when no line is armed.
+   *
+   * Lives here rather than in `strokeFor` because that function is pure -- the
+   * whole reason its asymmetries are testable. See `drawingCommands.ts`.
+   */
+  private lineAnchor: LineAnchor = null;
 
   /** Editor state, distinct from anything saved with a project. */
   private prefs: Preferences;
@@ -498,6 +527,16 @@ export class Orchestrator implements CommandBus {
   private recorder: VideoRecorder | null = null;
 
   /**
+   * The permanent state archive. Constructed INERT and does nothing until the
+   * `strongLogging` preference turns it on -- see `archive/archive.ts`.
+   *
+   * Always present rather than nullable, so the one call site in `recordHistory`
+   * has no branch to forget. A disabled archive costs a null check per undo
+   * entry, which is once per deliberate act.
+   */
+  private readonly archive = new ProjectArchive();
+
+  /**
    * Whether a settings panel is open, so `settingsSources()` can skip building
    * the three payloads when nothing reads them.
    *
@@ -549,6 +588,12 @@ export class Orchestrator implements CommandBus {
 
     this.history.seed(this.project);
     this.selection = new SelectionController(this.selectionHost());
+
+    // The preference PERSISTS, so a session that starts with it on begins
+    // recording immediately -- otherwise strong logging would silently need
+    // re-ticking every reload. The startup state becomes a root only if it is
+    // unseen, which for a returning user's usual preset it will not be.
+    if (this.prefs.strongLogging) this.startArchiving();
   }
 
   /**
@@ -628,6 +673,10 @@ export class Orchestrator implements CommandBus {
     const strafeField = await StrafeField.create(opts.device, system.canvasSize);
     strafeField.setWrap(loaded.world.boundaryConditions === BC.WRAP);
     system.setStrafeField(strafeField.view(), strafeField.size);
+    // Preferences are loaded from `localStorage` before this, so a strength the
+    // user set in an earlier session applies from the first frame rather than
+    // from whenever they next touch a control.
+    system.setFieldStrengths(fieldStrengthsFor(prefs));
 
     // Bound before the system goes live for the same reason the strafe field is:
     // `setDensityField` rebuilds the compute texture groups, and that is only
@@ -828,7 +877,11 @@ export class Orchestrator implements CommandBus {
     // should contain has to drop the still or the edit would be invisible until
     // the next resume. Painting and clearing both stay live while paused (see
     // the field section below), which is exactly why they must be listed here.
-    const fieldEdited = this.pendingStroke !== null || this.clearFieldPending;
+    // `.size > 0`, NOT the Set itself. `clearFieldPending` was a boolean and is
+    // now a Set of layers -- and an EMPTY Set is truthy, so the bare reference
+    // this line used to carry would make `fieldEdited` permanently true and no
+    // paused frame could ever hold its settled still.
+    const fieldEdited = this.pendingStroke !== null || this.clearFieldPending.size > 0;
     const holdingSettled =
       this.paused &&
       !settling &&
@@ -873,19 +926,28 @@ export class Orchestrator implements CommandBus {
     // Painting HERE rather than inside `runFrame` is the whole cadence argument:
     // one stroke segment per rendered frame, so brush weight never tracks the
     // physics rate (`drawing_commands.py:14-19`).
-    if (this.clearFieldPending) {
-      this.strafeField.clear(encoder);
-      this.clearFieldPending = false;
+    if (this.clearFieldPending.size > 0) {
+      for (const layer of this.clearFieldPending) {
+        this.strafeField.clear(encoder, layer);
+      }
+      this.clearFieldPending.clear();
       // A cleared field ends the stroke in progress: the next press should start
       // fresh rather than draw a segment from wherever the cursor was.
       this.strokePrevUv = null;
     }
     if (this.pendingStroke !== null) {
-      const { uv, prevUv, erasing } = this.pendingStroke;
-      if (erasing) {
-        this.strafeField.erase(encoder, uv, prevUv, this.prefs.drawSize);
-      } else {
-        this.strafeField.draw(encoder, uv, prevUv, this.prefs.drawSize, this.prefs.drawPower);
+      const { uv, prevUv, erasing, isLine } = this.pendingStroke;
+      // The layer comes from the ACTIVE TOOL, resolved here rather than captured
+      // when the stroke was recorded: both are the same frame, and asking once at
+      // the point of use means there is no second copy to fall out of step.
+      const layer = layerForMouseMode(this.mouseMode);
+      if (layer !== null) {
+        const brush = this.brushParams(layer, isLine);
+        if (erasing) {
+          this.strafeField.erase(encoder, uv, prevUv, brush);
+        } else {
+          this.strafeField.draw(encoder, uv, prevUv, brush);
+        }
       }
       this.pendingStroke = null;
     }
@@ -1059,7 +1121,13 @@ export class Orchestrator implements CommandBus {
         this.prefs,
         {
           ...NO_OVERLAYS,
-          showField: this.prefs.fieldAlwaysShow || this.mouseMode === 'draw',
+          // The SAME rule the screen pass uses (`overlayState`), so a recording
+          // shows the fields exactly as the editor did. The reticle, the line
+          // preview and the crop box are all absent here by way of NO_OVERLAYS --
+          // those are annotations about what the mouse is doing, and burning them
+          // into the video would record the tool rather than the work.
+          showField: this.prefs.fieldAlwaysShow || this.mouseMode === 'walls',
+          showTrails: this.prefs.trailsAlwaysShow || this.mouseMode === 'trails',
           capture: {
             scale,
             offset: [(1 - scale[0]) / 2, (1 - scale[1]) / 2],
@@ -1224,16 +1292,33 @@ export class Orchestrator implements CommandBus {
           this.dispatch({ kind: state.shift ? 'redo' : 'undo' });
         }
       }
-    } else if (this.mouseMode === 'draw') {
+    } else if (isPaintingTool(this.mouseMode)) {
       // RECORDS INTENT, DOES NOT PAINT. Painting needs an encoder, and this runs
       // above the one `frame()` opens -- deliberately, because that is what
       // makes a stroke land once per rendered frame instead of once per physics
       // sub-step. `frame()` consumes what this records.
-      const step = strokeFor(state, this.strokePrevUv, (p) => this.mouseFieldUv(p));
+      //
+      // ONE BRANCH FOR BOTH PAINTING TOOLS. Walls and Trails differ only in the
+      // layer the stroke lands in, which `frame()` resolves from the active tool
+      // -- so the gesture handling, the line tool and the stroke memory are
+      // shared rather than duplicated per tool.
+      const step = strokeFor(
+        state,
+        this.strokePrevUv,
+        (p) => this.mouseFieldUv(p),
+        this.lineAnchor,
+      );
       this.pendingStroke = step.stroke;
       this.strokePrevUv = step.prevUv;
+      this.lineAnchor = step.lineAnchor;
+    } else {
+      // EVERY OTHER TOOL DISARMS THE LINE. Switching to Select or Shove with an
+      // anchor still set would leave a preview on screen belonging to a tool that
+      // is no longer active, and arm a stroke the next painting tool never asked
+      // for.
+      this.lineAnchor = null;
     }
-    // SHOVE HAS NO BRANCH HERE, and that asymmetry with DRAW is correct rather
+    // SHOVE HAS NO BRANCH HERE, and that asymmetry with the painting tools is
     // than an omission. A shove is not an event to record: `shoveState` reads
     // the same `InputState` directly in the frame loop, because its answer is a
     // uniform the physics loop needs, not a pass to encode. The desktop splits
@@ -1288,8 +1373,12 @@ export class Orchestrator implements CommandBus {
    * THE ACTIVE TOOL DECIDES, so this is the Orchestrator's call: the assembler
    * renders what it is told and the UI owns no simulation truth (invariant 10).
    * The field can optionally stay visible outside the Draw tool; the reticle
-   * never does, because it shows where a brush that is not currently usable
-   * would land.
+   * follows the cursor only inside it, because there it shows where a brush
+   * that is not currently usable would land.
+   *
+   * The ONE exception is an active Brush Size drag, which shows a centred ring
+   * in every tool -- it is a measurement of the size being chosen rather than
+   * an aim, and it lasts only as long as the gesture. See `setBrushSizePreview`.
    *
    * The reticle serves BOTH brush tools: Draw and Shove share `drawSize`, so
    * the ring means the same thing in each -- the reach of what the button is
@@ -1301,10 +1390,22 @@ export class Orchestrator implements CommandBus {
    * before the field exists.
    */
   private overlayState(): OverlayState {
-    const drawing = this.mouseMode === 'draw';
+    const painting = layerForMouseMode(this.mouseMode);
     const shoving = this.mouseMode === 'shove';
-    const brushing = drawing || shoving;
-    const showField = this.prefs.fieldAlwaysShow || drawing;
+
+    // **THE ACTIVE PAINTING TOOL FORCES ITS OWN LAYER ON. It does not force the
+    // other one off.**
+    //
+    // The floor is what the tool needs: you are always looking at what you are
+    // painting, because painting blind is not a preference worth offering. Above
+    // that floor the two `alwaysShow` checkboxes mean exactly what they say, in
+    // EVERY tool -- including the other painting tool. Drawing trails while
+    // watching the walls you are threading them around is a real thing to want,
+    // and an earlier rule that switched the other layer off in the painting tools
+    // made those checkboxes silently inert in the two modes where you are most
+    // likely to be looking at them.
+    const showField = this.prefs.fieldAlwaysShow || painting === 'walls';
+    const showTrails = this.prefs.trailsAlwaysShow || painting === 'trails';
     // The crop box, whenever one has been asked for and is smaller than the
     // window. Independent of the tool and of the reticle: it says what will be
     // recorded, which is true regardless of what the mouse is currently doing.
@@ -1317,24 +1418,77 @@ export class Orchestrator implements CommandBus {
     // will land or how wide it is -- which is not a preference so much as a way
     // to break them.
     //
-    // The FIELD is still read from prefs, and deliberately: `fieldAlwaysShow`
-    // is a real choice between seeing the barriers all the time and seeing them
-    // only while drawing. The reticle has no such second mode.
-    if (!brushing) {
-      return { ...NO_OVERLAYS, showField, crop };
+    // The FIELDS are still read from prefs, and deliberately: the two
+    // `alwaysShow` flags are a real choice between seeing a layer all the time
+    // and seeing it only while painting it. The reticle has no such second mode.
+    // **THE BRUSH SIZE DRAG OVERRIDES THE TOOL GATE**, which is why the rule is
+    // `reticlePlacement`'s rather than an `if` here: the interaction between the
+    // gate and the gesture is the only real logic in this method, and there it
+    // is a pure function with tests. Null means no ring at all.
+    const placement = reticlePlacement(this.mouseMode, this.brushSizePreview);
+    if (placement === null) {
+      return { ...NO_OVERLAYS, showField, showTrails, crop };
     }
     // The brush's VISIBLE extent, which is 2 sigma of its gaussian -- and also
     // exactly the eraser's hard radius, so the ring reads as "what the eraser
     // will take". Measured in the aspect-corrected metric the brush shader
     // paints in, so what crosses this boundary is a plain scalar.
+    const radius = 2.0 * this.prefs.drawSize;
     return {
       ...NO_OVERLAYS,
       showField,
+      showTrails,
       crop,
-      reticleCenter: this.mouseFieldUv(this.input.mousePos),
-      reticleRadius: 2.0 * this.prefs.drawSize,
-      reticleDashed: shoving,
+      // CENTRED WHILE SIZING, and on the cursor otherwise. See
+      // `setBrushSizePreview` for why the middle rather than the mouse: during
+      // this drag the mouse is on the slider, which is off in a panel.
+      //
+      // The centre of the CANVAS in uv, not of the window -- `[0.5, 0.5]` is
+      // the same point the aspect-corrected metric measures the radius from, so
+      // the ring is round and correctly sized without a second transform.
+      reticleCenter: placement.centred
+        ? [0.5, 0.5]
+        : this.mouseFieldUv(this.input.mousePos),
+      reticleRadius: radius,
+      // The bare ring outside the brush tools -- see `reticlePlacement`, which
+      // owns that call. Inside them the style is the live one it always was.
+      reticleStyle: placement.decorated
+        ? shoving
+          ? 'dashed'
+          : this.brushReticleStyle()
+        : 'plain',
+      reticleAngle: this.prefs.drawAngle,
+      // The preview exists exactly while a line is armed. `lineAnchor` is
+      // cleared by every path that abandons one -- releasing Shift, switching
+      // tool, committing -- so there is no separate "should I preview" question
+      // to get wrong.
+      linePreview:
+        this.lineAnchor === null
+          ? null
+          : { from: this.lineAnchor, to: this.mouseFieldUv(this.input.mousePos) },
     };
+  }
+
+  /**
+   * Which decoration the reticle carries for the current brush mode.
+   *
+   * **THE RING IS THE SAME CIRCLE IN EVERY MODE**; only the decoration differs,
+   * because the modes differ only in the direction they deposit -- which is
+   * otherwise invisible until after the first stroke. Stroke mode gets the bare
+   * ring, since its direction is the cursor's own travel and the moving cursor
+   * already shows it.
+   */
+  private brushReticleStyle(): ReticleStyle {
+    switch (BRUSH_MODES[this.prefs.brushMode] ?? 'diverge') {
+      case 'converge':
+        return 'in';
+      case 'stroke':
+        return 'plain';
+      case 'fixed':
+        return 'fixed';
+      default:
+        return 'out';
+    }
   }
 
   /**
@@ -1382,6 +1536,28 @@ export class Orchestrator implements CommandBus {
   private cropPreview: Resolution | null = null;
 
   /**
+   * Show a centred reticle while the Brush Size slider is being dragged.
+   *
+   * The same bargain `setCropPreview` above makes, for the same reason: the size
+   * has to be visible while it is being CHOSEN, and the thing that shows it is
+   * an overlay only the Orchestrator can position. A plain setter rather than a
+   * command because it is a statement about what the editor is showing -- it
+   * changes no preference, reaches no history, and survives no reload. The
+   * value itself still travels as `editDrawPref` exactly as before.
+   *
+   * **WHY THE MIDDLE OF THE SCREEN.** The reticle normally rides the cursor,
+   * but during this drag the cursor is on the slider -- off in a side panel,
+   * where a ring would be measured against the panel rather than against the
+   * artwork, and possibly clipped by its edge. The centre is the one place that
+   * is always on screen and always over the picture.
+   */
+  setBrushSizePreview(previewing: boolean): void {
+    this.brushSizePreview = previewing;
+  }
+
+  private brushSizePreview = false;
+
+  /**
    * Screen pixel -> field texture uv [0,1].
    *
    * COMPOSED from `coords`, never reimplemented. The reference carried six
@@ -1409,6 +1585,30 @@ export class Orchestrator implements CommandBus {
       cam.zoom,
     );
     return worldToUv(world, this.strafeField.size);
+  }
+
+  /**
+   * The brush settings a stroke is painted with.
+   *
+   * **BUILT AT THE POINT OF USE, from live preferences.** The brush has no cached
+   * state of its own, so changing a slider takes effect on the next stroke with
+   * nothing to invalidate.
+   *
+   * `brushModeFor` is what makes a stored index safe: `brushMode` is persisted to
+   * `localStorage` as an int, so a downgrade -- or a hand-edited entry -- can
+   * present an index past the end of `BRUSH_MODES`, and the default is a better
+   * answer than an undefined lookup reaching the uniform packer.
+   */
+  private brushParams(layer: FieldLayer, isLine: boolean): BrushParams {
+    return {
+      drawSize: this.prefs.drawSize,
+      drawPower: this.prefs.drawPower,
+      mode: BRUSH_MODES[this.prefs.brushMode] ?? 'diverge',
+      layer,
+      drawAngle: this.prefs.drawAngle,
+      // Freehand deposits every frame; a line deposits once. See the constant.
+      lineGain: isLine ? LINE_STROKE_GAIN : 1.0,
+    };
   }
 
   // =========================================================================
@@ -1606,7 +1806,24 @@ export class Orchestrator implements CommandBus {
         this.setProject(p);
       },
       recordHistory: (before, label) => {
-        this.recordHistory(before, label);
+        // THE COHORT IS TAGGED, and this is the only call site that needs to.
+        // An adopted rule is a pure function of the parent state and the cohort
+        // (`rule.wgsl`), so the archive stores the number and recomputes the 80
+        // floats offline -- but the number cannot be recovered from the rule,
+        // and this is the only place that knows it.
+        //
+        // `this.selected` is the pick that produced this very commit:
+        // `SelectionController.resolve` calls `setSelected` immediately before
+        // `recordHistory`, so it is the winner and not a stale one. Null only
+        // if that ordering changes, and the archive would rather record a
+        // rule-bearing delta than a wrong cohort -- hence no fallback guess.
+        const picked = this.selected;
+        this.recordHistory(
+          before,
+          label,
+          null,
+          picked === null ? null : { kind: 'commitSelection', cohort: picked.cohort },
+        );
       },
       setSelected: (result) => {
         this.selected = result;
@@ -1774,9 +1991,29 @@ export class Orchestrator implements CommandBus {
     this.recordHistory(before, historyLabelFor(event));
   }
 
-  private recordHistory(before: Project, label: string, coalesceKey: string | null = null): void {
+  /**
+   * `tag` carries what a state diff cannot recover. Today that is exactly one
+   * thing -- a selection's cohort number -- and it is optional so the other call
+   * sites are unchanged. See `archive/delta.ts`'s `ArchiveTag`.
+   */
+  private recordHistory(
+    before: Project,
+    label: string,
+    coalesceKey: string | null = null,
+    tag: ArchiveTag | null = null,
+  ): void {
     if (before !== this.project) {
-      this.history.record(before, this.project, label, coalesceKey);
+      // THE OUTCOME IS PASSED ON, and it is what keeps the archive exactly as
+      // strict as the timeline. A drag calls this once per frame; only `record`
+      // knows the fortieth call is still the first act, so without its answer
+      // the archive filed a node per frame while the undo menu showed the single
+      // entry it always did. See `RecordOutcome`.
+      const outcome = this.history.record(before, this.project, label, coalesceKey);
+      // AFTER the history record and inside the same identity guard, so the
+      // archive sees exactly the steps the timeline does -- previews and
+      // undo/redo excluded. Never throws into a frame: `recordVisit` is
+      // synchronous bookkeeping plus a detached write.
+      this.archive.recordVisit(before, this.project, label, tag, outcome);
     }
   }
 
@@ -1972,10 +2209,22 @@ export class Orchestrator implements CommandBus {
   dispatch(command: Command): void {
     switch (command.kind) {
       case 'reset':
+        // TIER 2 OF THE VISIT LOG: a discrete act that moves no project state.
+        // There is no before/after to diff -- a reset returns the simulation to
+        // its initial conditions without touching the config -- so it is
+        // recorded as an EVENT rather than as a state. See `CommandVisit`.
+        this.archive.recordCommand('reset', 'reset simulation');
         this.system.reset();
         return;
 
       case 'togglePause':
+        // The RESULTING state, not the verb, so a reader does not have to
+        // replay every toggle from the start of the session to know whether the
+        // simulation was running. `this.paused` has not flipped yet.
+        this.archive.recordCommand(
+          'togglePause',
+          this.paused ? 'resume' : 'pause',
+        );
         this.paused = !this.paused;
         // PAUSING queues the settle frame; RESUMING cancels one that never got
         // to run. A pause-then-resume inside a single frame must not leave the
@@ -1988,11 +2237,17 @@ export class Orchestrator implements CommandBus {
         this.settledView = null;
         return;
 
+      // THE TWO DISCRETE CAMERA ACTS, and the only two recorded. Camera
+      // MOVEMENT is a continuous per-frame value governed by a blur schedule
+      // with no act to name, and is deliberately absent from the log
+      // (`CommandVisit` says why). These two are button presses like any other.
       case 'toggleCameraMode':
+        this.archive.recordCommand('toggleCameraMode', 'toggle camera mode');
         this.camera.state.toggleMode();
         return;
 
       case 'resetCamera':
+        this.archive.recordCommand('resetCamera', 'reset camera');
         this.camera.state.reset();
         return;
 
@@ -2105,6 +2360,11 @@ export class Orchestrator implements CommandBus {
       }
 
       case 'setMouseMode':
+        // WHICH TOOL, not what it did. The strokes themselves are absent from
+        // the log -- they write into GPU textures no hash covers -- but knowing
+        // the user switched to the brush at this point in the session is both
+        // cheap and exactly the context those missing strokes would have given.
+        this.archive.recordCommand('setMouseMode', `tool: ${command.mode}`);
         // Switching tools abandons any stroke in progress (Step 9), so
         // releasing the button over a different tool cannot resume painting.
         this.mouseMode = command.mode;
@@ -2135,6 +2395,18 @@ export class Orchestrator implements CommandBus {
         if (previous !== null) {
           this.notify(describeHistoryStep('undo', undone));
           this.setProject(previous);
+          // THE ARCHIVE CURSOR FOLLOWS, and nothing is recorded. An undo reaches
+          // a state already on the map, so there is no discovery -- but the next
+          // act's parent is read from the cursor, and that is what makes undoing
+          // and then working forward record a BRANCH rather than a straight
+          // line. See `archive/archive.ts`.
+          //
+          // THE DIRECTION IS PASSED so the visit log can say a step BACK was
+          // taken. No node is written either way -- an undo reaches mapped
+          // territory -- but "the user backed up three steps and then went a
+          // different way" is invisible in the node tree, which shows the fork
+          // with no hint of how it was reached.
+          this.archive.moveCursor(previous, 'undo');
           this.resetForUndoRedo();
           // Undoing a rule adoption or a reroll gives the particles a target
           // rule they were not obeying a moment ago, which is a behavior change
@@ -2164,6 +2436,9 @@ export class Orchestrator implements CommandBus {
         if (next !== null) {
           this.notify(describeHistoryStep('redo', redone));
           this.setProject(next);
+          // Follows without adding a node, exactly as undo does above, and logs
+          // the direction for the same reason.
+          this.archive.moveCursor(next, 'redo');
           this.resetForUndoRedo();
           // Redo re-applies the rule change undo just took away, so it is a
           // behavior change by the same argument. See the undo case above.
@@ -2494,7 +2769,18 @@ export class Orchestrator implements CommandBus {
         // and a render pass needs an encoder, which a command handler has not
         // got. The frame loop consumes this above its paused branch, so clearing
         // works while paused.
-        this.clearFieldPending = true;
+        //
+        // ONE LAYER PER COMMAND. Both Clear buttons are on screen at once in the
+        // Drawing Controls, so a set is what lets two arrive in the same frame
+        // and both take effect.
+        //
+        // LOGGED THOUGH NOT UNDOABLE, and the two are unrelated questions. The
+        // timeline holds Projects and this state is not one, which is why undo
+        // cannot have it; the visit log holds ACTS, and clearing a field is as
+        // deliberate as any button on screen. This is the clearest case of the
+        // log recording something History structurally cannot.
+        this.archive.recordCommand('clearStrafeField', `clear field: ${command.layer}`);
+        this.clearFieldPending.add(command.layer);
         return;
 
       default: {
@@ -2526,6 +2812,67 @@ export class Orchestrator implements CommandBus {
   //     tab, a denied database, a corrupt file -- none of them should take the
   //     app down.
   // =========================================================================
+
+  /**
+   * Open the archive and begin recording from the current state.
+   *
+   * FIRE-AND-FORGET, like every other storage handler here, and silent on
+   * failure: an unavailable database means strong logging simply does not
+   * happen. It is a research feature, and nothing about the app's real work
+   * depends on it -- reporting through `saveError` would put an archive problem
+   * in the same place a lost save appears, which overstates it.
+   *
+   * The current project becomes a ROOT only if it is genuinely unseen; someone
+   * who enables logging while sitting on a preset they have visited before adds
+   * no root. `ProjectArchive.enable` does that dedup.
+   */
+  private startArchiving(): void {
+    void openArchiveStore().then((store) => {
+      if (store === null) return;
+      // Re-read the preference rather than trusting the call: the open is async,
+      // and a user who ticked the box and immediately unticked it must not end
+      // up with a live archive.
+      if (!this.prefs.strongLogging) return;
+      return this.archive.enable(store, this.project);
+    });
+  }
+
+  /**
+   * The archive as a document, or null when there is nothing to export.
+   *
+   * PUBLIC, because the Preferences panel's download button needs it and the UI
+   * holds only the `Status`/`dispatch` boundary otherwise. Returning the document
+   * rather than triggering the download keeps the DOM out of the Orchestrator --
+   * `preferencesSection.ts` owns the blob and the anchor, as `saveFile.ts` does
+   * for recordings.
+   */
+  async exportArchive(): Promise<ArchiveDocument | null> {
+    const db = await openArchiveDb();
+    if (db === null) return null;
+    return await buildArchiveDocument(db);
+  }
+
+  /**
+   * Discard every archived state.
+   *
+   * **THE IN-MEMORY DEDUP SET IS CLEARED TOO**, and forgetting that would be the
+   * subtle half of this: `ProjectArchive` mirrors the stored hashes in memory to
+   * keep `recordVisit` synchronous, so a session that emptied the database while
+   * still holding the old set would skip every state it had already seen -- the
+   * user clears the archive, keeps working, and records almost nothing, with no
+   * error anywhere. See `forgetAll`.
+   *
+   * Re-roots afterwards when logging is still on, so the state on screen is
+   * carried into the fresh archive rather than the next act being parented on a
+   * hash that no longer exists.
+   */
+  async clearArchive(): Promise<void> {
+    const db = await openArchiveDb();
+    if (db === null) return;
+    await clearArchive(db);
+    this.archive.forgetAll();
+    if (this.prefs.strongLogging) this.archive.enterState(this.project, 'session');
+  }
 
   /** Look an entry up, reporting through `saveError` rather than throwing. */
   private resolveEntry(category: string, name: string): ConfigEntry | null {
@@ -2799,9 +3146,71 @@ export class Orchestrator implements CommandBus {
     if (updated.oneClickSelection && !this.prefs.oneClickSelection) {
       this.clearHighlight();
     }
+    // STRONG LOGGING FLIPPING IS A SIDE EFFECT OF THE PREFERENCE, so it belongs
+    // here for the reason `oneClickSelection`'s clear does: this is the one place
+    // preferences change, and a second route would be a second thing to forget.
+    //
+    // Enabling opens the database and seeds the dedup set, which is async -- and
+    // deliberately NOT awaited: `adoptPreferences` is called from synchronous
+    // command handlers, and a checkbox must not block a frame on IndexedDB. The
+    // archive records nothing until it settles, which costs at most the first act
+    // after ticking the box.
+    if (updated.strongLogging !== this.prefs.strongLogging) {
+      if (updated.strongLogging) this.startArchiving();
+      else this.archive.disable();
+    }
+    // **THE ONE PLACE PREFERENCE CHANGES REACH THE VISIT LOG**, and it is here
+    // for the same reason the two side effects above are: this is the single
+    // funnel every preference write in the app passes through, so `editSetting`,
+    // `editDrawPref`, `editViewPref`, `resetPreferences` and the world-size and
+    // calibration paths are all covered without a line at any of them.
+    //
+    // AFTER the strong-logging flip above and BEFORE `this.prefs` moves, so the
+    // diff still has the old values to compare against. A user who just enabled
+    // logging records nothing here -- `startArchiving` is async and the archive
+    // is still inert -- which is the correct outcome and not a lost event: the
+    // preference it would record is `strongLogging` itself, which is excluded.
+    this.logPreferenceChanges(this.prefs, updated);
     this.prefs = updated;
+    // THE ONE PLACE THE FIELD STRENGTHS REACH THE SIMULATION, because this is the
+    // one place preferences change. Pushed rather than read per frame: the value
+    // moves when a slider does, and `runFrame` would rebuild it 30 times a frame
+    // for something the user touches once a session (see `setFieldStrengths`).
+    this.system.setFieldStrengths(fieldStrengthsFor(this.prefs));
     savePreferences(this.prefs);
     return needsRebuild ? this.rebuildSystem() : Promise.resolve();
+  }
+
+  /**
+   * Record every preference that moved, one visit-log entry per field.
+   *
+   * ITERATES `PREFERENCE_KEYS` RATHER THAN THE OBJECT, so a preference added
+   * later is covered the moment it joins the registry -- there is no second list
+   * here to forget to update. The registry is already the single source of truth
+   * for which preferences exist (`PREFERENCE_KINDS` is `satisfies`-tied to the
+   * interface, so a missing entry is a compile error), and this borrows that
+   * guarantee rather than restating it.
+   *
+   * **`strongLogging` IS SKIPPED, and the asymmetry is the reason.** Enabling it
+   * could be recorded, but disabling it never can -- recording has already
+   * stopped by the time the value changes -- so the pair would appear in the data
+   * as a series of enables with no matching disables, which reads as a bug in the
+   * recorder rather than as the truth. An absent field is honest; a
+   * half-recorded one is not. `visits.ts` says the same from the other side.
+   *
+   * One entry per FIELD rather than one per call: a `resetPreferences` that moves
+   * nine settings is nine entries. See `PreferenceVisit` for why the fine grain
+   * is the cheaper choice in both directions.
+   */
+  private logPreferenceChanges(before: Preferences, after: Preferences): void {
+    if (before === after) return;
+    for (const key of PREFERENCE_KEYS) {
+      if (key === 'strongLogging') continue;
+      const previous = before[key];
+      const value = after[key];
+      if (previous === value) continue;
+      this.archive.recordPreference(key, value, previous, `set ${key}`);
+    }
   }
 
   /**
@@ -2872,6 +3281,12 @@ export class Orchestrator implements CommandBus {
     replacement.setDensityScale(this.densityScale);
 
     replacement.applyProject(this.project.configs, this.project.world);
+    // CARRIED ACROSS, like the project above it. A fresh system starts on
+    // `DEFAULT_FIELD_STRENGTHS`, so without this a World Size change would
+    // silently snap both sliders back to 1.0 in effect while the UI went on
+    // showing whatever the user had set -- the controls and the simulation
+    // disagreeing, with nothing on screen to say so.
+    replacement.setFieldStrengths(fieldStrengthsFor(this.prefs));
 
     const outgoingSystem = this.system;
     const outgoingField = this.strafeField;

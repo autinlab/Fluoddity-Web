@@ -35,6 +35,22 @@ export function buildPreferencesSection(
   const bindings: ControlBinding[] = [];
   /** Set by the calibrate button, so `refresh` can keep its label current. */
   let paintCalibrateButton: (() => void) | null = null;
+  /**
+   * The archive buttons' blades, hidden while Strong Logging is off.
+   *
+   * **NOT `revealsOn`, and it is not an oversight.** That mechanism resolves a
+   * `Setting`'s governing field and is applied by `Panel.applyVisibility`, which
+   * walks `ControlBinding`s -- and these are buttons, which have no registry
+   * entry and produce no binding. Giving them one would mean inventing a
+   * `Setting` for something that stores no value, which is exactly what
+   * `advancedToggle.ts` declined to do for the same reason.
+   *
+   * So the section owns their visibility and applies it from `refresh`, which is
+   * the same per-frame pass `applyVisibility` runs in. `blade.hidden` rather than
+   * a rebuild, for the reason that method gives: a rebuild would drop folder
+   * expansion state to change a class.
+   */
+  const archiveButtons: { hidden: boolean }[] = [];
 
   // FIRST, above the groups it governs. See `projectSection.ts`.
   addAdvancedToggle(folder, 'advancedPreferences', ctx);
@@ -57,6 +73,26 @@ export function buildPreferencesSection(
       if (setting.field === 'physicsSteps' && ctx.calibrateRate !== undefined) {
         paintCalibrateButton = addCalibrateButton(sub, ctx.calibrateRate);
       }
+
+      // **DIRECTLY BENEATH THE CHECKBOX THEY SERVE**, for the reason the
+      // calibrate button sits under Physics Rate: a button several rows away
+      // reads as belonging to whatever it happens to sit under.
+      //
+      // BUILT ALWAYS, SHOWN CONDITIONALLY -- see `archiveButtons`. They are
+      // hidden while Strong Logging is off, so someone who has never turned the
+      // feature on sees one checkbox rather than three rows of machinery for a
+      // database they do not have. Absent entirely only where the host supplies
+      // no handler (the DOM tests), which leaves no button rather than an inert
+      // one.
+      if (setting.field === 'strongLogging' && ctx.downloadArchive !== undefined) {
+        archiveButtons.push(addDownloadArchiveButton(sub, ctx.downloadArchive));
+      }
+      // AFTER the download button, deliberately: the safe action is the one
+      // reached first, and "keep a copy before discarding it" is the order these
+      // two are meant to be used in.
+      if (setting.field === 'strongLogging' && ctx.clearArchive !== undefined) {
+        archiveButtons.push(addClearArchiveButton(sub, ctx.clearArchive));
+      }
     }
   }
 
@@ -68,8 +104,124 @@ export function buildPreferencesSection(
       // The label carries the run's progress, so it changes every probe. Cheap:
       // `paintCalibrateButton` guards on the rendered string.
       paintCalibrateButton?.();
+
+      // **READ FROM `editPrefs`, WHICH IS EMPTY WHILE THE PANEL IS SHUT** -- the
+      // deliberate optimization in `settingsSources`. That makes the buttons
+      // hide themselves whenever nothing can see them, which costs nothing and
+      // is the same conclusion `isRevealed` reaches from the same absence: a
+      // missing governing value counts as OFF.
+      const on = s.editPrefs['strongLogging'] === true;
+      for (const blade of archiveButtons) {
+        // Guarded on an actual transition, because the setter touches class
+        // lists and this runs every frame. Same reasoning as
+        // `Panel.applyVisibility`.
+        if (blade.hidden !== !on) blade.hidden = !on;
+      }
     },
   };
+}
+
+/**
+ * Give a button blade the full row, and tag it for the DOM tests.
+ *
+ * **THE LABEL COLUMN IS COLLAPSED, and it has to be.** Tweakpane lays every
+ * blade out as a fixed label cell beside a value cell, so a button renders in
+ * the right-hand third of the row -- which clipped "Auto-calibrate Physics Rate"
+ * to "Auto-calibrate Physics R". Every button here has a label wide enough to
+ * care, because each is a sentence rather than a word.
+ *
+ * Found STRUCTURALLY, not by class name: Tweakpane's own classes are minified
+ * (`controls.ts` explains at length why the tooling never depends on them), and
+ * what is stable is that the label is the blade's first child cell and holds no
+ * control. Same traversal `perfLabels.ts` uses, and it fails soft the same way --
+ * a Tweakpane change costs the full width, never a crash.
+ *
+ * SHARED BY ALL THREE BUTTONS here rather than copied into each. It was written
+ * once for Auto-calibrate and copied for the archive buttons, which is exactly
+ * the point at which a private helper is cheaper than a third copy.
+ */
+function spanRow(element: HTMLElement, settingId: string): void {
+  element.dataset['setting'] = settingId;
+  const cells = [...element.children].filter(
+    (cell): cell is HTMLElement => cell instanceof HTMLElement,
+  );
+  const label = cells.find((cell) => cell.querySelector('button') === null);
+  if (label !== undefined) label.style.display = 'none';
+  const value = cells.find((cell) => cell.querySelector('button') !== null);
+  if (value !== undefined) value.style.width = '100%';
+}
+
+/**
+ * The Clear Archive button.
+ *
+ * **OPENS A CONFIRMATION; IT DOES NOT CLEAR.** What this destroys cannot be
+ * recreated by any means -- the states are reachable only by having visited
+ * them, and re-visiting means retracing an exploration whose value was that it
+ * was unrepeatable. That is a stronger case for a dialog than Reset Preferences
+ * has, and it gets the same treatment. `Dialogs` owns the wording.
+ *
+ * No running state, unlike the download button: this returns as soon as the
+ * dialog is up, and the work behind it happens after the user has agreed.
+ */
+function addClearArchiveButton(
+  folder: FolderApi,
+  clear: NonNullable<SectionContext['clearArchive']>,
+): { hidden: boolean } {
+  const button = folder.addButton({ title: 'Clear Archive…' });
+  spanRow(button.element as HTMLElement, 'prefs.strongLogging.clear');
+  // The ellipsis is doing real work: it is the convention for "this opens a
+  // dialog" rather than "this acts now", which is what makes the button safe to
+  // sit one row under a download the user came here for.
+  button.on('click', () => {
+    clear();
+  });
+  // The BLADE, so the caller can hide it. Returned rather than the element,
+  // because `hidden` is Tweakpane's own property and setting it keeps the pane's
+  // idea of the row in step with the DOM.
+  return button;
+}
+
+/**
+ * The Download Archive button.
+ *
+ * Full-width for the reason the calibrate button is: it acts on the checkbox
+ * ABOVE it and has nothing to sit beside, and its label changes while it runs.
+ *
+ * **THE LABEL IS THE ONLY PROGRESS REPORT, and that is deliberate.** Reading a
+ * large archive out of IndexedDB and serializing it takes a moment, and the
+ * alternative -- a toast, or a `Status` field -- would put a research feature's
+ * plumbing into the frame loop. A button that says "Preparing…" and then goes
+ * back to its name is the whole of what this needs.
+ */
+function addDownloadArchiveButton(
+  folder: FolderApi,
+  download: NonNullable<SectionContext['downloadArchive']>,
+): { hidden: boolean } {
+  const TITLE = 'Download Archive';
+  const button = folder.addButton({ title: TITLE });
+  spanRow(button.element as HTMLElement, 'prefs.strongLogging.download');
+
+  let running = false;
+  button.on('click', () => {
+    // A second click while the first export is still reading would start a
+    // second pass over the same database and hand the user two files.
+    if (running) return;
+    running = true;
+    button.title = 'Preparing…';
+    void download()
+      .catch((e: unknown) => {
+        // Reported HERE rather than through `saveError`: that surface is for
+        // lost work, and a failed research export is not that. See
+        // `Orchestrator.startArchiving` for the same argument.
+        console.warn(`Could not export the archive: ${String(e)}`);
+      })
+      .finally(() => {
+        running = false;
+        button.title = TITLE;
+      });
+  });
+  // The blade, so the caller can hide it. See `addClearArchiveButton`.
+  return button;
 }
 
 /**
@@ -89,27 +241,10 @@ function addCalibrateButton(
   calibrate: NonNullable<SectionContext['calibrateRate']>,
 ): () => void {
   const button = folder.addButton({ title: calibrate.label() });
-  const element = button.element as HTMLElement;
-  element.dataset['setting'] = 'prefs.physicsSteps.calibrate';
-
-  // **THE LABEL COLUMN IS COLLAPSED, and it has to be.** Tweakpane lays every
-  // blade out as a fixed label cell beside a value cell, so a button renders in
-  // the right-hand third of the row -- which clipped this title to
-  // "Auto-calibrate Physics R". This is the one control here wide enough to
-  // care, because its label is a sentence rather than a word.
-  //
-  // Found STRUCTURALLY, not by class name: Tweakpane's own classes are minified
-  // (`controls.ts` explains at length why the tooling never depends on them),
-  // and what is stable is that the label is the blade's first child cell and
-  // holds no control. Same traversal `perfLabels.ts` uses, and it fails soft the
-  // same way -- a Tweakpane change costs the full width, never a crash.
-  const cells = [...element.children].filter(
-    (cell): cell is HTMLElement => cell instanceof HTMLElement,
-  );
-  const label = cells.find((cell) => cell.querySelector('button') === null);
-  if (label !== undefined) label.style.display = 'none';
-  const value = cells.find((cell) => cell.querySelector('button') !== null);
-  if (value !== undefined) value.style.width = '100%';
+  // Full width, for this button's own reason as well as the shared one: it is
+  // the one control here that takes SECONDS to complete, and the width is what
+  // makes its changing label legible while it runs. See `spanRow`.
+  spanRow(button.element as HTMLElement, 'prefs.physicsSteps.calibrate');
 
   // No `isRefreshing` guard: a button's click is always the user's. The guard
   // exists for BINDINGS, whose `change` fires on a programmatic refresh too.

@@ -134,6 +134,9 @@ test('the registry has the same 35 entries the desktop does, plus the web-only o
     'densityForce',
     // No desktop equivalent: it renders on black and has no background control.
     'backgroundColor',
+    // No desktop equivalent: the state archive is a web-only research feature,
+    // and there is no IndexedDB behind the desktop to write it to.
+    'strongLogging',
   ];
   const ported = SETTINGS.filter((s) => !WEB_ONLY.includes(s.field));
   assert.equal(ported.length, 35);
@@ -323,9 +326,11 @@ test('grouped preserves declaration order and omits empty groups', () => {
   // 'Mutation' is absent, and that is the point: both its members are
   // `panel: false`, so the group empties itself through `visible()` and is
   // omitted for exactly the same reason an all-Advanced group is in Basic.
-  // 'Behavior' is LAST because its one member is declared last, which is how
-  // "Reset on Behavior Change" ends up at the bottom of the Preferences panel.
-  // That placement is the reason it is a group of its own, so it is pinned here.
+  // 'Behavior' and then 'Archive' come LAST because their members are declared
+  // last, which is how they end up at the bottom of the Preferences panel. Both
+  // placements are the reason each is a group of its own, so the order is pinned
+  // here -- 'Archive' is the research feature, and it must stay below every
+  // setting that changes what the app does.
   // 'Density Image' sits after 'Forces' because that is what it is -- two of its
   // three channels are the same force/strafe pair gravity uses, reading a
   // texture instead of a constant direction. Declaring it before 'Trails' keeps
@@ -334,7 +339,7 @@ test('grouped preserves declaration order and omits empty groups', () => {
   assert.deepEqual(
     advanced.map(([name]) => name),
     ['Population', 'Sensors', 'Forces', 'Density Image', 'Trails', 'Appearance',
-     'Advanced', 'Simulation', 'Display', 'Behavior'],
+     'Advanced', 'Simulation', 'Display', 'Behavior', 'Archive'],
   );
   // 'Trails' holds one ADVANCED entry, so Basic must not render it.
   const basic = grouped(false, [CONFIG, WORLD, PREFS]);

@@ -54,6 +54,13 @@
  * after (`blurSchedule.test.ts:269`), so every subsequent paused frame renders
  * live. Clearing a field this harness never paints costs nothing.
  *
+ * THE `layer` IS REQUIRED and there is no default. The command clears ONE named
+ * layer since the Drawing Controls grew a button for each, and a dispatch
+ * without one puts `undefined` in `clearFieldPending` -- which still drops the
+ * still, because that is keyed on the set being non-empty, and then asks the
+ * field to clear a layer that does not exist. 'walls' is the arbitrary choice
+ * of two; neither is ever painted here.
+ *
  * ---------------------------------------------------------------------------
  * WHAT MUST BE PINNED
  * ---------------------------------------------------------------------------
@@ -139,7 +146,7 @@ const PAGE_HARNESS = `
     async setup() {
       if (!o.status().paused) o.dispatch({ kind: 'togglePause' });
       await frames(3);            // the settle frame runs and arms the hold
-      o.dispatch({ kind: 'clearStrafeField' });
+      o.dispatch({ kind: 'clearStrafeField', layer: 'walls' });
       await frames(2);            // fieldEdited drops it; settledView is now null
       const p = o.preferences;
       return {
@@ -204,7 +211,7 @@ const PAGE_HARNESS = `
     async run(steps) {
       o.dispatch({ kind: 'reset' });
       for (let i = 0; i < steps; i++) await o.probeFrame();
-      o.dispatch({ kind: 'clearStrafeField' });   // drop the still; see the header
+      o.dispatch({ kind: 'clearStrafeField', layer: 'walls' });  // drop the still; see the header
       await frames(2);
       return { frameCount: o.diagnostics.frameCount, physicsSteps: o.preferences.physicsSteps };
     },

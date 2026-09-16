@@ -75,6 +75,36 @@ export interface SectionContext extends ControlContext {
     /** Whether a run is in flight, so the button can offer to cancel. */
     readonly running: () => boolean;
   };
+  /**
+   * Write the strong-logging archive to a file.
+   *
+   * OPTIONAL, and supplied the same way `calibrateRate` is and for the same
+   * reason: it needs something a section cannot reach -- here the Orchestrator's
+   * database rather than the frame loop. Absent in the DOM tests, where the
+   * button is not built at all rather than built and inert.
+   */
+  readonly downloadArchive?: () => Promise<void>;
+  /**
+   * Ask to discard every archived state.
+   *
+   * **OPENS A CONFIRMATION, and does not itself destroy anything** -- which is
+   * why it is synchronous where `downloadArchive` is not. A section builds a
+   * button; what a destructive one costs the user is the dialog's business.
+   */
+  readonly clearArchive?: () => void;
+  /**
+   * Report that the Brush Size slider is or is not being dragged.
+   *
+   * Drives the centred reticle -- see `Orchestrator.setBrushSizePreview`. A
+   * callback rather than a command for that method's reason: it says what the
+   * EDITOR is showing, and a command would put a transient hover state into
+   * history.
+   *
+   * Optional like `calibrateRate` and `downloadArchive` above, and absent in
+   * the DOM tests, where the slider then simply drives no overlay rather than
+   * reaching for an orchestrator that is not there.
+   */
+  readonly setBrushSizePreview?: (previewing: boolean) => void;
 }
 
 /** One built section. */

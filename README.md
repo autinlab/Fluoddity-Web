@@ -1327,8 +1327,12 @@ straight to a number and hands a number back (verified in the bundle, not taken
 from the docs), so `0xRRGGBB` buys a real colour picker for one registry entry —
 and `localStorage`, `coerce`, `Status.editPrefs` and `urlOptions`'s numeric
 proposal all carry it with no new machinery. Three fields would have meant three
-sliders and three of everything else. It rides `flags.yzw` in the frame-assembly
-uniform, which were already reserved, so no struct grew.
+sliders and three of everything else. It rode `flags.yzw` in the frame-assembly
+uniform, which were reserved at the time, so no struct grew. The trails overlay
+and the line tool have since claimed two of those three, so it now has a
+`background` vec4 of its own at offset 128 and the struct is 144 bytes. It did
+not become a packed int in the one remaining lane: the host unpacks it once per
+frame, and a bitcast-and-mask in the shader would run once per pixel.
 
 Four decisions in the composite, all of which look arbitrary and are not:
 

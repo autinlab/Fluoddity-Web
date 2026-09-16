@@ -37,7 +37,10 @@ import { RECORDING_FPS, driverAction } from './recorder/recordingSettings.ts';
 // Static, and deliberately so: the file picker must run before any await in the
 // export click handler. Both this and `recordingSettings.ts` are leaves that
 // pull in neither mediabunny nor the GPU. See `recorder/saveFile.ts`.
-import { chooseRecordingFile } from './recorder/saveFile.ts';
+import { chooseRecordingFile, downloadRecording } from './recorder/saveFile.ts';
+// The archive export. Pure data plus a Blob -- no GPU and no mediabunny, so a
+// static import costs the main bundle nothing the lazy loading protects.
+import { archiveBlob, archiveFilename } from './archive/export.ts';
 import { calibrate } from './calibration/calibrate.ts';
 // The ladder's result type, needed now that `rung` is declared before the
 // `try` that assigns it rather than inferred from the call. `BLOOM_MIN_WORLD_SIZE`
@@ -467,6 +470,28 @@ async function start(): Promise<void> {
             orchestrator.setRecorder(null);
             return recorder.finish();
           },
+        },
+        // Strong logging's export. Supplied HERE for `recording`'s reason: it
+        // needs the Orchestrator's archive database AND an `<a download>`, and
+        // `CommandBus` deliberately admits no DOM. `downloadRecording` is the
+        // same anchor-and-revoke this file already uses for a finished video --
+        // it is named for its first caller, not limited to it.
+        downloadArchive: async () => {
+          const doc = await orchestrator.exportArchive();
+          // No database, or none yet created because logging was never on.
+          // Nothing to say: the button simply produces no file.
+          if (doc === null) return;
+          downloadRecording(archiveBlob(doc), archiveFilename());
+        },
+        // The other half. Runs only after `Dialogs` has confirmed -- the panel
+        // wires the button to the confirmation, not to this.
+        clearArchive: () => orchestrator.clearArchive(),
+        // The centred brush reticle, shown while Brush Size is being dragged.
+        // Supplied here for `setCropPreview`'s reason: it is editor chrome
+        // landing on the Orchestrator, so it takes a plain callback rather than
+        // a command and never reaches history.
+        setBrushSizePreview: (previewing) => {
+          orchestrator.setBrushSizePreview(previewing);
         },
         // Omitted under `?nocalibrate`, which leaves `Panel.calibrate()` inert
         // and so also disables the re-run on Reset Editor Preferences.

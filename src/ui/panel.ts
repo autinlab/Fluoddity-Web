@@ -57,6 +57,7 @@ import type {
   Status,
   ViewPrefField,
 } from '../orchestrator/commands.ts';
+import { MOUSE_MODES, usesBrushReticle } from '../orchestrator/commands.ts';
 import { type ControlBinding, currentValues } from './controls.ts';
 import { Dialogs } from './dialogs.ts';
 import { GateState } from './gateState.ts';
@@ -281,6 +282,36 @@ export interface PanelOptions {
     readonly finish: (recorder: VideoRecorder) => Promise<RecordingResult>;
   };
   /**
+   * Write the strong-logging archive to a file.
+   *
+   * Injected for `recording`'s reason and by the same argument: the export needs
+   * the Orchestrator's archive database AND an `<a download>`, and `CommandBus`
+   * deliberately admits neither -- it is a value-in, value-out seam that keeps
+   * DOM and Web APIs out of the Orchestrator. `main.ts` holds both halves.
+   *
+   * Omitted in the DOM tests, where the button is then absent rather than
+   * present and broken.
+   */
+  readonly downloadArchive?: () => Promise<void>;
+  /**
+   * Discard every archived state. Supplied with `downloadArchive` and for the
+   * same reason -- the database is the Orchestrator's and `CommandBus` admits no
+   * Web APIs.
+   *
+   * The CONFIRMATION is not this function's business: `Dialogs` owns it, and
+   * this runs only after the user has agreed.
+   */
+  readonly clearArchive?: () => Promise<void>;
+  /**
+   * Report that the Brush Size slider is being dragged, so a centred reticle can
+   * show the size being chosen. See `Orchestrator.setBrushSizePreview`.
+   *
+   * Supplied by the host for `recording`'s reason -- it lands on the
+   * Orchestrator, and `CommandBus` deliberately admits only commands, which this
+   * must not be: it is editor chrome and belongs in no history.
+   */
+  readonly setBrushSizePreview?: (previewing: boolean) => void;
+  /**
    * The canvas a share image is captured from.
    *
    * PASSED IN rather than found with `getElementById`, matching how `bus` and
@@ -322,8 +353,14 @@ interface PanelSide {
  * A set rather than a list, because what matters at every use site is
  * membership: the tab rule is about crossing INTO or OUT OF this group, and
  * moves within it change nothing.
+ *
+ * Built from `usesBrushReticle` rather than written out, so it cannot disagree
+ * with the predicate that decides whether the reticle is drawn -- the tools that
+ * show a brush are exactly the tools whose brush settings you want to reach.
  */
-const BRUSH_TOOLS: ReadonlySet<MouseMode> = new Set<MouseMode>(['shove', 'draw']);
+const BRUSH_TOOLS: ReadonlySet<MouseMode> = new Set<MouseMode>(
+  MOUSE_MODES.filter(usesBrushReticle),
+);
 
 export class Panel {
   private readonly bus: CommandBus;
@@ -606,6 +643,21 @@ export class Panel {
   private readonly recording: NonNullable<PanelOptions['recording']> | null;
 
   /**
+   * See `PanelOptions.downloadArchive`. Null where the host supplies no exporter.
+   *
+   * `NonNullable` for the reason `recording` above is: one way to say absent.
+   */
+  private readonly downloadArchive: NonNullable<PanelOptions['downloadArchive']> | null;
+
+  /** See `PanelOptions.clearArchive`. Null where the host supplies none. */
+  private readonly clearArchive: NonNullable<PanelOptions['clearArchive']> | null;
+
+  /** See `PanelOptions.setBrushSizePreview`. Null where the host supplies none. */
+  private readonly setBrushSizePreview:
+    | NonNullable<PanelOptions['setBrushSizePreview']>
+    | null;
+
+  /**
    * Whether a calibration run is in flight.
    *
    * Guards against a second run being started on top of the first -- two
@@ -641,6 +693,10 @@ export class Panel {
     this.runCalibration = opts.runCalibration ?? null;
     this.onHiddenChange = opts.onHiddenChange ?? null;
     this.recording = opts.recording ?? null;
+    this.downloadArchive = opts.downloadArchive ?? null;
+    // BEFORE `new Dialogs(...)` below, whose clear-archive callback reads it.
+    this.clearArchive = opts.clearArchive ?? null;
+    this.setBrushSizePreview = opts.setBrushSizePreview ?? null;
 
     // **RESETTING PREFERENCES RE-CALIBRATES.** A reset puts World Size and
     // Physics Rate back to compiled-in defaults the user never chose and their
@@ -664,6 +720,14 @@ export class Panel {
       send,
       onCopyShareLink: () => {
         this.copyShareLink();
+      },
+      onClearArchive: () => {
+        // Fire-and-forget: the dialog has already closed and there is nothing
+        // to report. A failure warns to the console rather than surfacing --
+        // see `preferencesSection`'s download button for the same argument.
+        void this.clearArchive?.().catch((e: unknown) => {
+          console.warn(`Could not clear the archive: ${String(e)}`);
+        });
       },
     });
     // The gear rides the mutation bar now, at its right end -- see the bar's own
@@ -1023,6 +1087,26 @@ export class Panel {
       // Project section cannot accidentally grow a calibrate button by reading a
       // context member that was never meant for it.
       ...(which === RIGHT ? { calibrateRate: this.calibrateRateContext() } : {}),
+      // RIGHT ONLY, for the same reason: `strongLogging` is a `PREFS` field, so
+      // its button can only be built in the Preferences tab.
+      ...(which === RIGHT && this.downloadArchive !== null
+        ? { downloadArchive: this.downloadArchive }
+        : {}),
+      // The button OPENS THE CONFIRMATION rather than clearing: the section
+      // builds a button, and what a destructive one costs is the dialog's
+      // business, not a section's. See `Dialogs.openClearArchive`.
+      ...(which === RIGHT && this.clearArchive !== null
+        ? {
+            clearArchive: () => {
+              this.dialogs.openClearArchive();
+            },
+          }
+        : {}),
+      // RIGHT ONLY, like the three above: Drawing Controls is a tab of the right
+      // panel, so the left one has no Brush Size slider to report on.
+      ...(which === RIGHT && this.setBrushSizePreview !== null
+        ? { setBrushSizePreview: this.setBrushSizePreview }
+        : {}),
     };
   }
 

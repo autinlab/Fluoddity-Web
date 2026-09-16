@@ -182,8 +182,9 @@ Verified against the code as of this writing:
   settings are **untrusted**: `urlOptions.ts` parses and clamps them into a
   *proposal*, and a dialog decides — a query parameter must not be the back door
   that does what a loaded config is forbidden to do.
-- **`ui/settingsSpec.ts` has 40 entries**, not 35. The 35 in
-  `settingsSpec.test.ts:132` is the *ported* subset, asserted separately.
+- **`ui/settingsSpec.ts` has 45 entries**, not 35. The 35 in
+  `settingsSpec.test.ts` is the *ported* subset, asserted separately — the other
+  ten are web-only and listed there by name.
 - **`←`/`→` no longer cycle presets** (README's own hotkey section already
   records this); they drive the cohort stepper, with `Enter` to commit.
 - **`COALESCE_WINDOW_MS` is 1500**, not the 500 the README's divergence bullet

@@ -937,6 +937,30 @@ export const SETTINGS: readonly Setting[] = [
     group: 'Behavior',
     options: DROPDOWN_MODES.mobileMode,
   }),
+
+  // ================= PREFERENCES: Archive =================
+  // **DECLARED LAST, AFTER Behavior, AND THAT IS THE WHOLE POINT.** `grouped()`
+  // emits groups in the order their first member is declared, so this one lands
+  // at the very bottom of the Preferences panel -- below every setting that
+  // changes what the app does.
+  //
+  // ITS OWN GROUP RATHER THAN A ROW IN Behavior, which is where it started. Two
+  // things forced the move. It is the only control in the panel that writes a
+  // DATABASE, and it now carries two buttons of its own, so it is no longer one
+  // checkbox that could sit quietly among neighbours. And a group is what draws
+  // the separator: the folder header is the divider, so the research feature is
+  // visibly not part of the working settings above it.
+  setting({
+    field: 'strongLogging',
+    label: 'Strong Logging',
+    tier: ADVANCED,
+    source: PREFS,
+    kind: BOOL,
+    help:
+      'Record every project state you visit to a local archive, so the ' +
+      'exploration can be studied later. Changes nothing on screen',
+    group: 'Archive',
+  }),
 ];
 
 /**

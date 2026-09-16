@@ -49,16 +49,21 @@ import { PICK_UNIFORM_SIZE } from './pick.ts';
  *   shove      : vec4f      (16)  offset 48   xy: center   z: strength  w: size
  *   density    : vec4f      (16)  offset 64   xy: density field resolution
  *                                            z: density image scale
- *                                            w: reserved
- *   flags      : vec4f      (16)  offset 80   x: frame_count(i)
- *                                            y: strafe_active(i)
- *                                            z: density_active(i)
+ *                                            w: density_active(i)
+ *   flags      : vec4f      (16)  offset 80   x: frame_count(i)  y: strafe_active(i)
+ *                                             z: walls_strength  w: trails_strength
  *
  * The density field takes its OWN vec4 rather than the two spare lanes in
  * `canvas_res`. Both fields are built at the same dimensions today, and sharing
  * would quietly promote that coincidence to a requirement -- after which a
  * change to either sizing rule would skew the other's world->uv mapping, which
  * is a stretched field rather than an error.
+ *
+ * `density_active` RIDES IN `density.w`, NOT IN `flags`. It was in `flags.z`
+ * when `flags` still had two reserved lanes; the field strengths took both, so
+ * the flag moved to the one spare lane left in the vec4 it belongs to anyway.
+ * Its neighbours there describe the same image, which is a better home than the
+ * one it had -- `flags` is now full, and the next boolean needs a new vec4.
  *
  * `canvas_res` is THE `textureDimensions` HOIST. The GLSL calls
  * `textureSize(canvas_texture, 0)` at five sites per invocation
@@ -73,6 +78,35 @@ export const CANVAS_UNIFORM_SIZE = 48;
 
 /** `BrushUniforms` -- 64 bytes. world (32) + canvas_res (16) + flags (16). */
 export const BRUSH_UNIFORM_SIZE = 64;
+
+/**
+ * How strongly each painted layer acts, already multiplied by its base gain.
+ *
+ * **A NAMED PAIR RATHER THAN TWO FLOAT PARAMETERS**, because they are adjacent,
+ * same-typed and same-ranged: a transposed pair would compile, run, and produce a
+ * simulation where the walls slider moved the trails. The two mean entirely
+ * different things -- see `get_walls` and `get_can` -- so there is nothing to
+ * catch it downstream.
+ *
+ * `walls` arrives pre-multiplied by `FIELD_STRENGTH_GAIN`; `trails` by
+ * `TRAILS_FIELD_GAIN`. The shader applies no further constant.
+ */
+export interface FieldStrengths {
+  readonly walls: number;
+  readonly trails: number;
+}
+
+/**
+ * What the system uses until the Orchestrator pushes the user's preferences.
+ *
+ * These are the PRE-MULTIPLIED values for a strength of 1.0 on both sliders --
+ * i.e. `WALLS_FIELD_GAIN` and `TRAILS_FIELD_GAIN`. Restated here as literals
+ * rather than imported, because `particleSystem/` must not depend on `prefs/`
+ * (the simulation does not read the editor's settings; the Orchestrator brokers
+ * them, per invariant 3). `preferences.test.ts` asserts the two agree, which is
+ * what keeps the duplication honest.
+ */
+export const DEFAULT_FIELD_STRENGTHS: FieldStrengths = { walls: 0.01, trails: 0.001 };
 
 /** The Shove tool's live state, or null while the button is not held. */
 export interface ShoveState {
@@ -124,6 +158,7 @@ export function packEntityUpdateUniforms(
   frameCount: number,
   shove: ShoveState | null,
   strafeFieldActive: boolean,
+  strengths: FieldStrengths,
   densityFieldRes: readonly [number, number],
   densityActive: boolean,
   /**
@@ -152,16 +187,25 @@ export function packEntityUpdateUniforms(
   f32[AFTER_WORLD + 6] = shove === null ? 0.0 : shove.strength;
   f32[AFTER_WORLD + 7] = shove === null ? 0.0 : shove.size;
 
-  // density: xy resolution, z scale, w reserved
+  // density: xy resolution, z scale, w density_active(i)
   f32[AFTER_WORLD + 8] = densityFieldRes[0];
   f32[AFTER_WORLD + 9] = densityFieldRes[1];
   f32[AFTER_WORLD + 10] = densityScale;
+  i32[AFTER_WORLD + 11] = densityActive ? 1 : 0;
 
-  // flags: x frame_count(i), y strafe_field_active(i), z density_active(i),
-  //        w reserved
+  // flags: x frame_count(i), y strafe_field_active(i),
+  //        z walls_strength, w trails_strength
+  //
+  // The strengths are FLOATS in the last two lanes -- the two that were reserved.
+  // Note the index arithmetic runs off the same `AFTER_WORLD` base as the i32
+  // writes above: both views alias one ArrayBuffer, so lane 14 as a float and
+  // lane 14 as an int are the same four bytes. Writing one after the other into
+  // DIFFERENT lanes is what keeps that safe -- which is also why `density.w`
+  // above is an i32 write into a vec4 whose other three lanes are floats.
   i32[AFTER_WORLD + 12] = frameCount;
   i32[AFTER_WORLD + 13] = strafeFieldActive ? 1 : 0;
-  i32[AFTER_WORLD + 14] = densityActive ? 1 : 0;
+  f32[AFTER_WORLD + 14] = strengths.walls;
+  f32[AFTER_WORLD + 15] = strengths.trails;
 
   return buffer;
 }
